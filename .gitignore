@@ -1,0 +1,108 @@
+# Operating System Files
+#--------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor Backup Files
+#------------------
+*.swp
+*.swo
+*.swn
+*~
+*.bak
+*.backup
+
+# KiCad Files
+#-----------
+# Temporary files
+*.000
+*.bak
+*.bck
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*.kicad_prl
+*.sch-bak
+*~
+_autosave-*
+
+# Netlist files
+*.net
+
+# BOM files
+*.xml
+*.csv
+
+# Gerber files (uncomment if you don't want to track them)
+# *.gbr
+# *.drl
+# *.gbl
+# *.gtl
+# *.gbs
+# *.gts
+# *.gbo
+# *.gto
+
+# Generated files
+fp-info-cache
+*-cache
+*-rescue
+sym-lib-table-bak
+fp-lib-table-bak
+*-cache.lib
+*-cache.dcm
+
+# FreeCAD Files
+#-------------
+*.FCStd1
+*.fcstd1
+*.FCBak
+*.fcbak
+*.pyc
+__pycache__/
+.directory
+
+# STM32CubeIDE
+#-------------
+# Build directories
+Debug/
+Release/
+build/
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Binary files
+*.bin
+*.hex
+*.list
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# IDE specific files
+.cproject
+.project
+.settings/
+.idea/
+*.launch
+*.pdsbak
+.vscode/
+
+# STM32CubeMX generated files
+.mxproject
