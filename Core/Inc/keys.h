@@ -21,10 +21,19 @@
 #define NKRO_SIZE 6
 #define NKRO_EXT_SIZE 8
 
-#define DEBOUNCE_MASK   0xF0  // All 1s - stable state threshold
+#define DEBOUNCE_TIME_US 600
+
+typedef enum {
+    KEY_IDLE,
+    KEY_DEBOUNCE,
+    KEY_PRESSED,
+    KEY_HELD,
+    KEY_RELEASED
+} keystate_t;
+
 
 typedef struct {
-    uint8_t modifiers;                // Modifier keys (Ctrl, Alt, Shift, etc.)
+    uint8_t modifiers;
     uint8_t reserved;
     uint8_t keys[NKRO_SIZE];
     uint8_t ext_key[NKRO_EXT_SIZE];
@@ -70,14 +79,20 @@ typedef struct {
 
 // Layer definition
 typedef uint16_t keymap_t[KEY_ROWS][KEY_COLS];
+typedef keystate_t (*StateHandler)(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time);
 
 // Global State
 extern keyboard_state_t kb_state;
-extern uint8_t key_states[KEY_ROWS][KEY_COLS];
+extern keystate_t key_states[KEY_ROWS][KEY_COLS];
 extern keymap_t layers[KEY_LAYERS];
 extern ble_hid_report_t ble_report;
 
 // Function Prototypes
+keystate_t handleIdle(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time);
+keystate_t handleDebounce(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time);
+keystate_t handlePressed(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time);
+keystate_t handleHeld(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time);
+keystate_t handleReleased(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time);
 void loadKeymap(uint8_t layer, keymap_t *keymap);
 void initKeyboard(void);
 void processKey(uint8_t row, uint8_t col, bool pressed);
@@ -86,7 +101,5 @@ uint8_t getModifierBit(uint8_t keycode);
 bool isModifier(uint8_t keycode);
 void clearReport(void);
 void resetKeyboardState(void);
-void processKeyBatch(void);
-void debounceKey(uint8_t row, uint8_t col, bool new_state);
 
 #endif /* INC_KEYS_H_ */

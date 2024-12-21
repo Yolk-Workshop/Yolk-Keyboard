@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <assert.h>
 #include "logger.h"
+#include <inttypes.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,15 +47,22 @@ I2C_HandleTypeDef hi2c2;
 
 UART_HandleTypeDef hlpuart1;
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
+
+
 DMA_HandleTypeDef hdma_lpuart1_rx;
 DMA_HandleTypeDef hdma_lpuart1_tx;
 
 TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
+TIM_HandleTypeDef htim21; // Timer handler for TIM21
 TIM_HandleTypeDef htim3;
 extern USBD_HandleTypeDef hUsbDeviceFS;
 extern keyboard_state_t kb_state;
+
+static int8_t locked_row = -1;
+static int8_t locked_col = -1;
 
 uint16_t row_pins[KEY_ROWS] = {R0_Pin, R1_Pin, R2_Pin, R3_Pin, R4_Pin, R5_Pin};
 
@@ -84,19 +92,23 @@ static void MX_LPUART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
-void scanKeyMatrix(void);
 static void Init_TIM3(void);
+void Init_TIM21(void);
+void scanKeyMatrix(void);
 void sendUSBReport(void);
 void sendBLEReport(void);
 void initBluetooth(void);
-void reportArbiter(void);
-void CheckConnection(USBD_HandleTypeDef *pdev);
+void checkConnection(USBD_HandleTypeDef *pdev);
 void resetRows(void);
+static void reportArbiter(void);
+uint32_t elapsedTime(uint32_t start_time);
 void logger_output(const char *message);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+extern StateHandler stateMachine[5];
 extern uint8_t USBD_HID_SendReport(USBD_HandleTypeDef  *pdev,
 	                                   uint8_t *report,
 	                                   uint16_t len);
@@ -104,8 +116,7 @@ extern uint8_t USBD_HID_SendReport(USBD_HandleTypeDef  *pdev,
 volatile uint8_t scan_flag = 0;
 volatile uint8_t report_ready_flag = 0;
 
-
-/* USER CODE END 0 */
+volatile uint8_t dma_busy = 0;
 
 /**
   * @brief  The application entry point.
@@ -113,40 +124,26 @@ volatile uint8_t report_ready_flag = 0;
   */
 int main(void)
 {
-
-  /* USER CODE BEGIN 1 */
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
+  MX_USART2_UART_Init();
+  LOG_INFO("Core System Hardware Initialised");
+
   MX_I2C1_Init();
   MX_I2C2_Init();
-  MX_USART2_UART_Init();
-  MX_TIM2_Init();
-  LOG_INFO("All Peripherals Initialised");
+  LOG_INFO("I2C Peripheral Initialised");
 
-  /* USER CODE BEGIN 2 */
   //init USB
   MX_USB_DEVICE_Init();
-  CheckConnection(&hUsbDeviceFS);
-  if(!kb_state.connection_mode){
+  checkConnection(&hUsbDeviceFS);
+  if(kb_state.connection_mode){
 	  MX_LPUART1_UART_Init();
   }
   initKeyboard();
@@ -154,30 +151,29 @@ int main(void)
   LOG_INFO("Keyboard Hardware Initialised");
 
   //init timer 3
+  MX_TIM2_Init();
+  Init_TIM21();
   Init_TIM3();
-  LOG_INFO("TIMER 3 Initialised");
-  HAL_TIM_Base_Start_IT(&htim3);
-  /* USER CODE END 2 */
+  LOG_INFO("TIMER 2, 3 & 21 Initialised");
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
+  HAL_TIM_Base_Start(&htim21);
+  HAL_TIM_Base_Start_IT(&htim3);
+
   LOG_INFO("System ready and running");
   while (1)
   {
-    /* USER CODE END WHILE */
 	  if(scan_flag == 1){
 		  scanKeyMatrix();
 		  if(report_ready_flag){
 			  reportArbiter();
 			  report_ready_flag = 0;
-			  //LOG_DEBUG("HID report sent");
-		  }
+			 //LOG_DEBUG("HID report sent");
+		  	  }
 		  scan_flag = 0;
-		  //GPIOB->ODR ^= GPIO_PIN_12;
+
 	  }
-    /* USER CODE BEGIN 3 */
+
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -241,13 +237,6 @@ void SystemClock_Config(void)
 static void MX_I2C1_Init(void)
 {
 
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.Timing = 0x00B07CB4;
   hi2c1.Init.OwnAddress1 = 0;
@@ -275,9 +264,6 @@ static void MX_I2C1_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
 
 }
 
@@ -289,13 +275,6 @@ static void MX_I2C1_Init(void)
 static void MX_I2C2_Init(void)
 {
 
-  /* USER CODE BEGIN I2C2_Init 0 */
-
-  /* USER CODE END I2C2_Init 0 */
-
-  /* USER CODE BEGIN I2C2_Init 1 */
-
-  /* USER CODE END I2C2_Init 1 */
   hi2c2.Instance = I2C2;
   hi2c2.Init.Timing = 0x00B07CB4;
   hi2c2.Init.OwnAddress1 = 0;
@@ -323,9 +302,6 @@ static void MX_I2C2_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C2_Init 2 */
-
-  /* USER CODE END I2C2_Init 2 */
 
 }
 
@@ -336,14 +312,6 @@ static void MX_I2C2_Init(void)
   */
 static void MX_LPUART1_UART_Init(void)
 {
-
-  /* USER CODE BEGIN LPUART1_Init 0 */
-
-  /* USER CODE END LPUART1_Init 0 */
-
-  /* USER CODE BEGIN LPUART1_Init 1 */
-
-  /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
   hlpuart1.Init.BaudRate = 115200;
   hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
@@ -357,10 +325,6 @@ static void MX_LPUART1_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN LPUART1_Init 2 */
-
-  /* USER CODE END LPUART1_Init 2 */
-
 }
 
 /**
@@ -370,32 +334,37 @@ static void MX_LPUART1_UART_Init(void)
   */
 static void MX_USART2_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 9600;
+  huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
   huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_RTS_CTS;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart2.Init.OverSampling = UART_OVERSAMPLING_16;
   huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
   huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+
   if (HAL_UART_Init(&huart2) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART2_Init 2 */
 
-  /* USER CODE END USART2_Init 2 */
+}
 
+void Init_TIM21(void) {
+    __HAL_RCC_TIM21_CLK_ENABLE();
+
+    htim21.Instance = TIM21;
+    htim21.Init.Prescaler = (HAL_RCC_GetHCLKFreq() / 1000000) - 1; // 1 µs resolution
+    htim21.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim21.Init.Period = 0xFFFF; // 16-bit timer (can be extended if needed)
+    htim21.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim21.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+
+    if (HAL_TIM_Base_Init(&htim21) != HAL_OK) {
+            Error_Handler();
+        }
 }
 
 static void Init_TIM3(void) {
@@ -405,16 +374,14 @@ static void Init_TIM3(void) {
     TIM_ClockConfigTypeDef sClockSourceConfig = {0};
     TIM_MasterConfigTypeDef sMasterConfig = {0};
 
-    // For 2kHz (2000µs) with 32MHz clock:
-    // 32MHz / 2kHz = 16000
     htim3.Instance = TIM3;
     htim3.Init.Prescaler = 0;
     htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim3.Init.Period = 32000 - 1;  // For 2000µs period
+    htim3.Init.Period = 16000 - 1;
     htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
 
-    HAL_TIM_Base_Init(&htim3);  // Changed from PWM to Base
+    HAL_TIM_Base_Init(&htim3);
 
     sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
     HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig);
@@ -433,19 +400,31 @@ static void Init_TIM3(void) {
   * @param None
   * @retval None
   */
-static void MX_TIM2_Init(void)
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
 {
 
-  /* USER CODE BEGIN TIM2_Init 0 */
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
-  /* USER CODE END TIM2_Init 0 */
+  /* DMA interrupt init */
+  /* DMA1_Channel2_3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
+  /* DMA1_Channel4_5_6_7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel4_5_6_7_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel4_5_6_7_IRQn);
+
+}
+
+static void MX_TIM2_Init(void)
+{
 
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
 
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -474,26 +453,8 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM2_Init 2 */
 
-  /* USER CODE END TIM2_Init 2 */
   HAL_TIM_MspPostInit(&htim2);
-
-}
-
-/**
-  * Enable DMA controller clock
-  */
-static void MX_DMA_Init(void)
-{
-
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA1_CLK_ENABLE();
-
-  /* DMA interrupt init */
-  /* DMA1_Channel2_3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
 
 }
 
@@ -505,8 +466,6 @@ static void MX_DMA_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-/* USER CODE BEGIN MX_GPIO_Init_1 */
-/* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOE_CLK_ENABLE();
@@ -633,37 +592,60 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/**
- * Decide whether to send USB or BLE report and send it
- */
-void reportArbiter(void) {
-    uint32_t current_time = HAL_GetTick();
 
+static void delay_us(uint32_t us) {
+	if (us > 0xFFFF) {us = 0xFFFF;}
+    volatile uint32_t start_time = TIM21->CNT; // Capture the start time
+    while (((TIM21->CNT - start_time) & 0xFFFF) < us) {}
+}
+
+static inline uint32_t getMicroseconds(void) { return TIM21->CNT ; }
+
+uint32_t elapsedTime(uint32_t start_time) {
+    uint32_t current_time = getMicroseconds();
+    if (current_time >= start_time) {
+        return current_time - start_time;
+    } else {
+        return (0xFFFF - start_time + current_time);
+    }
+}
+
+static void reportArbiter(void)
+{
     if (kb_state.output_mode == OUTPUT_USB &&
-        (current_time - kb_state.last_report.usb_last_report >= HID_FS_BINTERVAL)) {
-        sendUSBReport();
-    }
-    else if (kb_state.output_mode == OUTPUT_BLE &&
-             (current_time - kb_state.last_report.ble_last_report >= HID_FS_BINTERVAL)) {
-        sendBLEReport();
-    }
+            elapsedTime(kb_state.last_report.usb_last_report) >= HID_FS_BINTERVAL * 1000) {
+    		//LOG_DEBUG("HID Interval:%lu", elapsedTime(kb_state.last_report.usb_last_report)/1000);
+            sendUSBReport();
+	}
+	else if (kb_state.output_mode == OUTPUT_BLE &&
+			 elapsedTime(kb_state.last_report.ble_last_report) >= HID_FS_BINTERVAL * 1000) {
+		sendBLEReport();
+	}
 }
 
 /**
  * Send USB HID report if state has changed
  */
-void sendUSBReport(void) {
+void sendUSBReport(void)
+{
     static hid_report_t last_report_usb = {0};
-    uint32_t current_time = HAL_GetTick();
+    uint32_t current_time = getMicroseconds();
+    /*
+    LOG_DEBUG("Modifiers: 0x%02X, Keys: [%02X, %02X, %02X, %02X, %02X, %02X]",
+              kb_state.current_report.modifiers,
+              kb_state.current_report.keys[0], kb_state.current_report.keys[1],
+              kb_state.current_report.keys[2], kb_state.current_report.keys[3],
+              kb_state.current_report.keys[4], kb_state.current_report.keys[5]);
+     */
 
     // Compare current report with last report to avoid redundant sends
     if (memcmp(&kb_state.current_report, &last_report_usb, sizeof(hid_report_t)) != 0) {
 
-    	//__disable_irq();
+    	__disable_irq();
         uint8_t result = USBD_HID_SendReport(&hUsbDeviceFS,
                             (uint8_t*)&kb_state.current_report,
                             sizeof(hid_report_t));
-        //__enable_irq();
+        __enable_irq();
         if (result == USBD_OK) {
             kb_state.last_report.usb_last_report = current_time;
             memcpy(&last_report_usb, &kb_state.current_report, sizeof(hid_report_t));
@@ -675,9 +657,10 @@ void sendUSBReport(void) {
 /**
  * Send BLE HID report if state has changed
  */
-void sendBLEReport(void) {
+void sendBLEReport(void)
+{
     static hid_report_t last_report = {0};
-    uint32_t current_time = HAL_GetTick();
+    uint32_t current_time = getMicroseconds();
 
     if (memcmp(&kb_state.current_report, &last_report, sizeof(hid_report_t)) != 0) {
         uint8_t uart_buffer[sizeof(ble_hid_report_t) + 2];
@@ -697,56 +680,73 @@ void sendBLEReport(void) {
     }
 }
 
+
 /**
  * Scan the keyboard matrix for key state changes
  */
-void scanKeyMatrix(void) {
+void scanKeyMatrix(void)
+{
+    uint32_t current_time = getMicroseconds();
+    static uint32_t prev_key_time = 0;
+
     for (uint8_t row = 0; row < KEY_ROWS; row++) {
-        // Activate the current row
-        row_ports[row]->ODR |= row_pins[row];
+        row_ports[row]->ODR |= row_pins[row]; // Activate row
+        delay_us(25); // StabiliSation delay
 
-        // Small delay for stabilization
-        for (volatile int i = 0; i < 200; i++) __asm("nop");
-
-        // Scan columns
         for (uint8_t col = 0; col < KEY_COLS; col++) {
-            bool new_state = (col_ports[col]->IDR & col_pins[col]);
-            __disable_irq();
-            debounceKey(row, col, new_state);
-            __enable_irq();
+            bool col_pressed = (col_ports[col]->IDR & col_pins[col]);
+
+            // Call the state handler and update the key state
+            key_states[row][col] = stateMachine[key_states[row][col]](row, col, col_pressed, current_time);
+
+            if (key_states[row][col] == KEY_PRESSED) {
+                // Log the time difference between successive key presses
+                if (prev_key_time) {LOG_DEBUG("Time between keys: %lu µs", current_time - prev_key_time);}
+
+                prev_key_time = current_time; // Update previous key press time
+                LOG_DEBUG("R[%d]C[%d]-Pressed", row, col);
+
+                locked_row = row;
+                locked_col = col;
+            }
+
+            if (key_states[row][col] == KEY_RELEASED && row == locked_row && col == locked_col) {
+                locked_row = -1;
+                locked_col = -1;
+            }
         }
 
-        // Deactivate row
-        row_ports[row]->ODR &= ~row_pins[row];
+        row_ports[row]->ODR &= ~row_pins[row]; // Deactivate row
     }
 }
 
-void CheckConnection(USBD_HandleTypeDef *pdev){
-	if((VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin) == 0){
+void checkConnection(USBD_HandleTypeDef *pdev)
+{
+	if(!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)){
 		// Check USB State
-		if (pdev->dev_state == USBD_STATE_CONFIGURED) {
+		if (pdev->dev_state == USBD_STATE_DEFAULT) {
 			kb_state.connection_mode = 0; // Host connected
+			LOG_DEBUG("USB Device State: 0x%02X",pdev->dev_state);
 			kb_state.output_mode = OUTPUT_USB;
-
 			LOG_DEBUG("Connection Mode: USB");
 			return;
 		} else {
 			kb_state.connection_mode = 1; // Host not fully enumerated
 			kb_state.output_mode = OUTPUT_BLE;
-
-			LOG_DEBUG("Connection Mode: BLE");
+			LOG_DEBUG("USB: 0x%02X",pdev->dev_state);
+			LOG_DEBUG("Connection Mode 1: BLE");
 			return;
 		}
 	} else {
 		kb_state.connection_mode = 1; // VBUS not detected
 		kb_state.output_mode = OUTPUT_BLE;
-
-		LOG_DEBUG("Connection Mode: BLE");
+		LOG_DEBUG("Connection Mode 2: BLE");
 		return;
 	}
 }
 
-void initBluetooth(void){
+void initBluetooth(void)
+{
 	MX_LPUART1_UART_Init();
 
 	BT_RESET_GPIO_Port->ODR |= BT_RESET_Pin;
@@ -760,8 +760,16 @@ void resetRows(void){
 	}
 }
 
+
 void logger_output(const char *message) {
-    HAL_UART_Transmit(&huart2, (uint8_t *)message, strlen(message), HAL_MAX_DELAY);
+    if(USART2->ISR & USART_ISR_TC){
+    	HAL_UART_Transmit_DMA(&huart2, (uint8_t *)message, strlen(message));
+    }
+}
+
+// And in your HAL_UART_TxCpltCallback:
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart == &huart2){ USART1->ICR = USART_ICR_TCCF;}
 }
 /* USER CODE END 4 */
 
@@ -777,9 +785,9 @@ void Error_Handler(void)
   LOG_ERROR("Hard-fault Occurred!");
   while (1)
   {
-		GPIOB->ODR &= ~GPIO_PIN_12;
-		HAL_Delay(10);
-		GPIOB->ODR &= ~GPIO_PIN_12;
+	  LOG_ERROR("RESET/POWER Cycling Required");
+	  HAL_Delay(60000);
+	  //implement EEPROM Error counter buffer or variable to track number of errors
   }
   /* USER CODE END Error_Handler_Debug */
 }

@@ -12,8 +12,10 @@
 // Global state
 ble_hid_report_t ble_report;
 keyboard_state_t kb_state = {0};
-uint8_t key_states[KEY_ROWS][KEY_COLS] = {0};
-uint8_t debounce_buffers[KEY_ROWS][KEY_COLS] = {0};
+keystate_t key_states[KEY_ROWS][KEY_COLS] = {0};
+static uint32_t last_change_time[KEY_ROWS][KEY_COLS] = {0}; // Initialize to 0
+
+//uint8_t debounce_buffers[KEY_ROWS][KEY_COLS] = {0};
 keymap_t layers[KEY_LAYERS] = {0};
 
 // Keymaps
@@ -29,6 +31,14 @@ keymap_t base_keymap = {
 keymap_t fn_keymap = {
     {KC_LOWER_BRIGHT, KC_INCR_BRIGHT, KC_APPLICATION, KC_FIND, KC_MIC_TOGGLE, KC_BACKLIGHT_DIM, KC_BACKLIGHT_INCR,
      KC_PREV, KC_PLAY, KC_NEXT, KC_VOLDOWN, KC_VOLUP, KC_LOCK}
+};
+
+StateHandler stateMachine[5] = {
+    [KEY_IDLE]      = handleIdle,
+    [KEY_DEBOUNCE]  = handleDebounce,
+    [KEY_PRESSED]   = handlePressed,
+    [KEY_HELD]      = handleHeld,
+    [KEY_RELEASED]  = handleReleased
 };
 
 extern volatile uint8_t report_ready_flag;
@@ -51,13 +61,7 @@ void loadKeymap(uint8_t layer, keymap_t *keymap) {
 }
 
 bool isModifier(uint8_t keycode) {
-    switch (keycode) {
-        case KC_LCTRL: case KC_LSHIFT: case KC_LALT: case KC_LGUI:
-        case KC_RCTRL: case KC_RSHIFT: case KC_RALT: case KC_RGUI:
-            return true;
-        default:
-            return false;
-    }
+    return keycode >= KC_LCTRL && keycode <= KC_RGUI;
 }
 
 uint8_t getModifierBit(uint8_t keycode) {
@@ -85,10 +89,12 @@ uint8_t getCurrentLayer(void) {
 }
 
 void clearReport(void) {
-	memset(&kb_state.current_report, 0, sizeof(hid_report_t));
-	kb_state.current_report.modifiers = 0;
-    memset(kb_state.current_report.keys, 0, sizeof(kb_state.current_report.keys));
-    kb_state.key_count = 0;
+	kb_state.fn_pressed = false;
+	kb_state.swap_active = false;
+	//kb_state.key_count = 0;
+	kb_state.current_layer = 0;
+	//memset(&kb_state.last_report, 0, sizeof(last_report_t));
+	//memset(&kb_state.current_report, 0, sizeof(hid_report_t));
 }
 
 void resetKeyboardState(void) {
@@ -112,114 +118,113 @@ static void handleKeyPress(uint8_t keycode) {
     }
 }
 
+
 static void handleKeyRelease(uint8_t keycode) {
     bool found = false;
-    // Remove key from 6KRO buffer
+
     for (uint8_t i = 0; i < kb_state.key_count; i++) {
+        // Compare keycode with current buffer entry
         if (kb_state.current_report.keys[i] == keycode) {
             found = true;
-            // Shift keys in the buffer
+            // Shift the remaining keys to fill the gap
             for (uint8_t j = i; j < kb_state.key_count - 1; j++) {
                 kb_state.current_report.keys[j] = kb_state.current_report.keys[j + 1];
             }
-            kb_state.current_report.keys[--kb_state.key_count] = 0;
-            LOG_DEBUG("6KRO-Release Cleared KC:0x%02X Buffer: [%u, %u, %u, %u, %u, %u]",
-                      keycode,
-                      kb_state.current_report.keys[0], kb_state.current_report.keys[1],
-                      kb_state.current_report.keys[2], kb_state.current_report.keys[3],
-                      kb_state.current_report.keys[4], kb_state.current_report.keys[5]);
+            // Decrease key count and clear the last position
+            kb_state.key_count--;
+            kb_state.current_report.keys[kb_state.key_count] = 0;
             break;
         }
     }
 
-    // If not found in 6KRO, clear NKRO bit
+    // If not found in the 6KRO buffer, clear the NKRO bit
     if (!found) {
-        uint8_t byte = keycode / 8;
-        uint8_t bit = keycode % 8;
+        uint8_t byte = keycode >> 3; // Divide by 8
+        uint8_t bit = keycode & 0x07; // Modulo 8
         if (byte < NKRO_EXT_SIZE) {
             kb_state.current_report.ext_key[byte] &= ~(1 << bit);
-            LOG_DEBUG("NKRO-Release Bitclr: %u Byte:%u KC:0x%02X", bit, byte, keycode);
         }
+    }
+}
+
+static void handleModifiers(uint8_t keycode, bool pressed) {
+    if (pressed) {
+        kb_state.current_report.modifiers |= getModifierBit(keycode);
+        LOG_DEBUG("Modifier Pressed: KC:0x%02X", keycode);
+    } else {
+        kb_state.current_report.modifiers &= ~getModifierBit(keycode);
+        LOG_DEBUG("Modifier Released: KC:0x%02X", keycode);
+    }
+
+    report_ready_flag = 1;
+}
+
+static void handleNormalKeys(uint8_t keycode, bool pressed) {
+    if (pressed) {
+        handleKeyPress(keycode);
+    } else {
+        handleKeyRelease(keycode);
     }
 }
 
 void processKey(uint8_t row, uint8_t col, bool pressed) {
     if (row >= KEY_ROWS || col >= KEY_COLS) return;
 
-    // Get keycode from the active layer
     uint8_t keycode = layers[getCurrentLayer()][row][col];
-    if (keycode == KC_NO) return;  // Ignore undefined keys
+    if (keycode == KC_NO) return;
 
-    LOG_DEBUG("KB:[row:%u][col:%u] KC:0x%02X", row, col, keycode);
+    LOG_DEBUG("KB:[%u][%u]-KC:0x%02X", row, col, keycode);
 
-    // Update key state
-    key_states[row][col] = pressed ? 1 : 0;
-
-    // Handle special keys
-    if (keycode == KC_FN) {
-        kb_state.fn_pressed = pressed;
-        LOG_DEBUG("FN key %s", pressed ? "pressed" : "released");
-        return;
-    }
-    if (keycode == KC_SWAP) {
-        kb_state.swap_active = pressed;
-        LOG_DEBUG("SWAP key %s", pressed ? "pressed" : "released");
-        return;
-    }
-
-    // Handle modifiers
     if (isModifier(keycode)) {
-        if (pressed) {
-            kb_state.current_report.modifiers |= getModifierBit(keycode);
-            LOG_DEBUG("MOD Press KC:0x%02X", keycode);
-        } else {
-            kb_state.current_report.modifiers &= ~getModifierBit(keycode);
-            LOG_DEBUG("MOD Release KC:0x%02X", keycode);
-        }
+        handleModifiers(keycode, pressed);
         return;
-    }
-
-    // Process regular keys
-    if (pressed) {
-        handleKeyPress(keycode);
     } else {
-        handleKeyRelease(keycode);
+        handleNormalKeys(keycode, pressed);
     }
 
-    // Mark the report as ready
     report_ready_flag = 1;
 }
 
-
-void debounceKey(uint8_t row, uint8_t col, bool new_state) {
-
-    // Shift the new sample into the buffer
-    debounce_buffers[row][col] <<= 1;
-    debounce_buffers[row][col] |= (new_state ? 1 : 0);
-
-    // Check if the buffer is stable (all 1s or all 0s)
-    if ((debounce_buffers[row][col] == DEBOUNCE_MASK) && !key_states[row][col]) {
-        key_states[row][col] = 1;
-        processKey(row, col, true);
-        LOG_DEBUG("Key [%u][%u] %s", row, col, true ? "PRESSED" : "RELEASED");
+keystate_t handleIdle(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
+    if (col_pressed) {
+        LOG_DEBUG("Key [%u][%u] DEBOUNCED", row, col);
+        last_change_time[row][col] = current_time;
+        return KEY_DEBOUNCE;
     }
-    else if ((debounce_buffers[row][col] == 0x00) && key_states[row][col]) {
-        key_states[row][col] = 0;
-        processKey(row, col, false);
-        LOG_DEBUG("Key [%u][%u] %s", row, col, false ? "PRESSED" : "RELEASED");
-    }
+    return KEY_IDLE;
 }
 
-
-void processKeyBatch(void) {
-    for (uint8_t row = 0; row < KEY_ROWS; row++) {
-        for (uint8_t col = 0; col < KEY_COLS; col++) {
-            if (key_states[row][col]) {
-                processKey(row, col, true);
-            } else {
-                processKey(row, col, false);
-            }
-        }
+keystate_t handleDebounce(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
+    if (col_pressed && (current_time - last_change_time[row][col] > DEBOUNCE_TIME_US)) {
+        LOG_DEBUG("Key [%u][%u] PRESSED", row, col);
+        processKey(row, col, true); // Key pressed
+        return KEY_PRESSED;
     }
-    report_ready_flag = 1;  // Batch processing complete
+    if (!col_pressed) {
+        return KEY_IDLE;
+    }
+    return KEY_DEBOUNCE;
 }
+
+keystate_t handlePressed(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
+    if (!col_pressed) {
+        LOG_DEBUG("Key [%u][%u] RELEASED", row, col);
+        processKey(row, col, false); // Key released
+        return KEY_RELEASED;
+    }
+    return KEY_HELD;
+}
+
+keystate_t handleHeld(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
+    if (!col_pressed) {
+        LOG_DEBUG("Key [%u][%u] RELEASED", row, col);
+        processKey(row, col, false); // Key released
+        return KEY_RELEASED;
+    }
+    return KEY_HELD;
+}
+
+keystate_t handleReleased(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
+    return KEY_IDLE;
+}
+

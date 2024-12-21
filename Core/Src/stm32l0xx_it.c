@@ -58,10 +58,12 @@
 extern PCD_HandleTypeDef hpcd_USB_FS;
 extern DMA_HandleTypeDef hdma_lpuart1_rx;
 extern DMA_HandleTypeDef hdma_lpuart1_tx;
-/* USER CODE BEGIN EV */
-extern void scanKeyMatrix(void);
 
+/* USER CODE BEGIN EV */
+
+extern DMA_HandleTypeDef hdma_usart2_tx;
 extern TIM_HandleTypeDef htim3;
+
 extern volatile uint8_t scan_flag;
 
 /******************************************************************************/
@@ -149,14 +151,15 @@ void SysTick_Handler(void)
   */
 void DMA1_Channel2_3_IRQHandler(void)
 {
-  /* USER CODE BEGIN DMA1_Channel2_3_IRQn 0 */
-
-  /* USER CODE END DMA1_Channel2_3_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_lpuart1_tx);
   HAL_DMA_IRQHandler(&hdma_lpuart1_rx);
-  /* USER CODE BEGIN DMA1_Channel2_3_IRQn 1 */
 
-  /* USER CODE END DMA1_Channel2_3_IRQn 1 */
+}
+
+
+void DMA1_Channel4_5_6_7_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_usart2_tx);
 }
 
 
@@ -171,7 +174,6 @@ void TIM3_IRQHandler(void) {
 		}
     }
 }
-
 
 /**
   * @brief This function handles USB event interrupt / USB wake-up interrupt through EXTI line 18.
