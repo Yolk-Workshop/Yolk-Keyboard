@@ -62,6 +62,7 @@ extern DMA_HandleTypeDef hdma_lpuart1_tx;
 /* USER CODE BEGIN EV */
 
 extern DMA_HandleTypeDef hdma_usart2_tx;
+extern UART_HandleTypeDef huart2;
 extern TIM_HandleTypeDef htim3;
 
 extern volatile uint8_t scan_flag;
@@ -162,6 +163,11 @@ void DMA1_Channel4_5_6_7_IRQHandler(void)
   HAL_DMA_IRQHandler(&hdma_usart2_tx);
 }
 
+void USART2_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart2);
+
+}
 
 void TIM3_IRQHandler(void) {
     if (__HAL_TIM_GET_FLAG(&htim3, TIM_FLAG_UPDATE) != RESET &&

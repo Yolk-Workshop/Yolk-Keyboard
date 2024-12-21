@@ -12,6 +12,17 @@
 #include <stdint.h>
 #include <string.h>
 
+#define LOG_BUFFER_COUNT 8  // Number of buffers in the queue
+#define LOG_BUFFER_SIZE 128 // Size of each buffer
+
+typedef struct {
+    char buffers[LOG_BUFFER_COUNT][LOG_BUFFER_SIZE];
+    volatile uint8_t write_index;
+    volatile uint8_t read_index;
+    volatile uint8_t buffer_count;
+    volatile uint8_t dma_busy;
+} log_buffer_t;
+
 // Debug levels
 typedef enum {
     LOG_LEVEL_NONE = 0,   // No logging
@@ -22,7 +33,8 @@ typedef enum {
 } log_level_t;
 
 // Buffer size for log messages
-#define BUFFER_SIZE 256
+#define COUNTOF(__BUFFER__)   (sizeof(__BUFFER__) / sizeof(*(__BUFFER__)))
+#define BUFFER_SIZE 128
 
 // Default debug level (can be modified during compilation)
 #ifndef DEBUG_LEVEL

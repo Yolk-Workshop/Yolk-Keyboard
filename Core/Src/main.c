@@ -116,7 +116,7 @@ extern uint8_t USBD_HID_SendReport(USBD_HandleTypeDef  *pdev,
 volatile uint8_t scan_flag = 0;
 volatile uint8_t report_ready_flag = 0;
 
-volatile uint8_t dma_busy = 0;
+volatile ITStatus uart2_tc_flag = SET;
 
 /**
   * @brief  The application entry point.
@@ -405,7 +405,6 @@ static void Init_TIM3(void) {
   */
 static void MX_DMA_Init(void)
 {
-
   /* DMA controller clock enable */
   __HAL_RCC_DMA1_CLK_ENABLE();
 
@@ -687,7 +686,6 @@ void sendBLEReport(void)
 void scanKeyMatrix(void)
 {
     uint32_t current_time = getMicroseconds();
-    static uint32_t prev_key_time = 0;
 
     for (uint8_t row = 0; row < KEY_ROWS; row++) {
         row_ports[row]->ODR |= row_pins[row]; // Activate row
@@ -700,12 +698,8 @@ void scanKeyMatrix(void)
             key_states[row][col] = stateMachine[key_states[row][col]](row, col, col_pressed, current_time);
 
             if (key_states[row][col] == KEY_PRESSED) {
-                // Log the time difference between successive key presses
-                if (prev_key_time) {LOG_DEBUG("Time between keys: %lu µs", current_time - prev_key_time);}
 
-                prev_key_time = current_time; // Update previous key press time
                 LOG_DEBUG("R[%d]C[%d]-Pressed", row, col);
-
                 locked_row = row;
                 locked_col = col;
             }
@@ -761,15 +755,71 @@ void resetRows(void){
 }
 
 
+static log_buffer_t log_queue = {0};
+
 void logger_output(const char *message) {
-    if(USART2->ISR & USART_ISR_TC){
-    	HAL_UART_Transmit_DMA(&huart2, (uint8_t *)message, strlen(message));
+    uint32_t primask;
+    uint16_t len = strlen(message);
+
+    // Critical section - disable interrupts
+    primask = __get_PRIMASK();
+    __disable_irq();
+
+    // Check if we have space in the queue
+    if (log_queue.buffer_count < LOG_BUFFER_COUNT) {
+        // Copy message to next available buffer
+        strncpy(log_queue.buffers[log_queue.write_index],
+                message,
+                LOG_BUFFER_SIZE - 1);
+        log_queue.buffers[log_queue.write_index][LOG_BUFFER_SIZE - 1] = '\0';
+
+        log_queue.write_index = (log_queue.write_index + 1) % LOG_BUFFER_COUNT;
+        log_queue.buffer_count++;
+
+        // If DMA not busy, start transmission
+        if (!log_queue.dma_busy && uart2_tc_flag == SET) {
+            len = strlen(log_queue.buffers[log_queue.read_index]);
+            if (HAL_UART_Transmit_DMA(&huart2,
+                (uint8_t*)log_queue.buffers[log_queue.read_index],
+                len) == HAL_OK) {
+                log_queue.dma_busy = 1;
+                uart2_tc_flag = RESET;
+            }
+        }
     }
+
+    // Restore interrupt state
+    __set_PRIMASK(primask);
 }
 
-// And in your HAL_UART_TxCpltCallback:
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart == &huart2){ USART1->ICR = USART_ICR_TCCF;}
+    uint16_t len;
+
+    if (huart == &huart2) {
+        uart2_tc_flag = SET;
+        log_queue.dma_busy = 0;
+
+        // Critical section
+        __disable_irq();
+
+        // If we have more messages, send next one
+        if (log_queue.buffer_count > 0) {
+            log_queue.buffer_count--;
+            log_queue.read_index = (log_queue.read_index + 1) % LOG_BUFFER_COUNT;
+
+            if (log_queue.buffer_count > 0) {
+                len = strlen(log_queue.buffers[log_queue.read_index]);
+                if (HAL_UART_Transmit_DMA(&huart2,
+                    (uint8_t*)log_queue.buffers[log_queue.read_index],
+                    len) == HAL_OK) {
+                    log_queue.dma_busy = 1;
+                    uart2_tc_flag = RESET;
+                }
+            }
+        }
+
+        __enable_irq();
+    }
 }
 /* USER CODE END 4 */
 
