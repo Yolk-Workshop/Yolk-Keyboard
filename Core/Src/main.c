@@ -24,6 +24,8 @@
 #include <assert.h>
 #include "logger.h"
 #include <inttypes.h>
+#include "rnbd350.h"
+#include "usbd_core.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,8 +60,11 @@ TIM_HandleTypeDef htim2;
 /* USER CODE BEGIN PV */
 TIM_HandleTypeDef htim21; // Timer handler for TIM21
 TIM_HandleTypeDef htim3;
+
 extern USBD_HandleTypeDef hUsbDeviceFS;
+extern rnbd350_handle_t rnbd350;
 extern keyboard_state_t kb_state;
+extern uint8_t ble_initialized;
 
 static int8_t locked_row = -1;
 static int8_t locked_col = -1;
@@ -118,6 +123,8 @@ volatile uint8_t report_ready_flag = 0;
 
 volatile ITStatus uart2_tc_flag = SET;
 
+
+
 /**
   * @brief  The application entry point.
   * @retval int
@@ -142,15 +149,20 @@ int main(void)
 
   //init USB
   MX_USB_DEVICE_Init();
-  checkConnection(&hUsbDeviceFS);
+  //checkConnection(&hUsbDeviceFS);
+  kb_state.connection_mode = 1;
+  kb_state.output_mode = OUTPUT_BLE;
   if(kb_state.connection_mode){
-	  MX_LPUART1_UART_Init();
+	  void initBluetooth(void);
+	  LOG_DEBUG("BLE_ENABLED");
   }
   initKeyboard();
+
   resetRows();
   LOG_INFO("Keyboard Hardware Initialised");
 
-  //init timer 3
+
+//init timer 3
   MX_TIM2_Init();
   Init_TIM21();
   Init_TIM3();
@@ -476,13 +488,10 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LMAT_RESET_GPIO_Port, LMAT_RESET_Pin, GPIO_PIN_RESET);
-
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LMAT_SDB_GPIO_Port, LMAT_SDB_Pin, GPIO_PIN_RESET);
-
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, UART_MODE_SW_Pin|EEPROM_WC_Pin, GPIO_PIN_RESET);
-
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, R0_Pin|R1_Pin|R2_Pin|R3_Pin
                           |R4_Pin|R5_Pin, GPIO_PIN_SET);
@@ -539,6 +548,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
+  GPIO_InitStruct.Pin = BT_RESET_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
   /*Configure GPIO pins : BT_RX_INPUT_Pin AMB_I2C_INT_Pin BT_RESET_Pin BT_TX_ALERT_Pin */
   GPIO_InitStruct.Pin = BT_RX_INPUT_Pin|AMB_I2C_INT_Pin|BT_RESET_Pin|BT_TX_ALERT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
@@ -576,7 +590,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 
-  // Configure GPIO pin 12 key stoke polling signal
+  // Configure GPIO pin 12 keystoke polling signal
   GPIO_InitStruct.Pin = GPIO_PIN_12;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -586,8 +600,7 @@ static void MX_GPIO_Init(void)
   // Enable and set EXTI interrupt priority
  HAL_NVIC_SetPriority(EXTI4_15_IRQn, 2, 0);
  HAL_NVIC_EnableIRQ(EXTI4_15_IRQn);
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-/* USER CODE END MX_GPIO_Init_2 */
+
 }
 
 /* USER CODE BEGIN 4 */
@@ -689,7 +702,7 @@ void scanKeyMatrix(void)
 
     for (uint8_t row = 0; row < KEY_ROWS; row++) {
         row_ports[row]->ODR |= row_pins[row]; // Activate row
-        delay_us(25); // StabiliSation delay
+        delay_us(25); // Stabilisation delay
 
         for (uint8_t col = 0; col < KEY_COLS; col++) {
             bool col_pressed = (col_ports[col]->IDR & col_pins[col]);
@@ -739,13 +752,60 @@ void checkConnection(USBD_HandleTypeDef *pdev)
 	}
 }
 
-void initBluetooth(void)
-{
-	MX_LPUART1_UART_Init();
 
-	BT_RESET_GPIO_Port->ODR |= BT_RESET_Pin;
-	LOG_DEBUG("Bluetooth Initialisation complete");
+void initBluetooth(void) {
+    uint32_t primask;
+    primask = __get_PRIMASK();
+    __disable_irq();
+
+    if (ble_initialized) {
+        __set_PRIMASK(primask);
+        return;
+    }
+
+    LOG_DEBUG("BLE_INIT_START");
+
+    USBD_DeInit(&hUsbDeviceFS);
+    MX_LPUART1_UART_Init();
+    memset(&rnbd350, 0, sizeof(rnbd350_handle_t));
+
+    rnbd350_config_t config = {
+        .baud_rate = hlpuart1.Init.BaudRate,
+        .flow_control = (hlpuart1.Init.HwFlowCtl == UART_HWCONTROL_RTS_CTS)
+    };
+
+    rnbd350.uart_write = uart_write_wrapper;
+    rnbd350.uart_read = uart_read_wrapper;
+    rnbd350.delay_ms = HAL_Delay;
+
+    rnbd350_reset_module(&rnbd350);
+
+    // Initialize module
+    rnbd350_status_t status = rnbd350_init(&rnbd350, &config);
+    LOG_DEBUG("BLE_INIT: %d", status);
+
+    if (status == RNBD350_OK) {
+        // Enter command mode
+        rnbd350.uart_write((uint8_t*)"$$$", 3);
+        // Enable HID service
+        rnbd350.uart_write((uint8_t*)"SS,44\r", 6);
+        // Set advertising data
+        rnbd350.uart_write((uint8_t*)"IA,01,05\r", 9);  // Flags AD type
+        rnbd350.uart_write((uint8_t*)"IA,02,1218\r", 11);  // Add HID service UUID
+        // Start advertising
+        rnbd350.uart_write((uint8_t*)"A\r", 2);
+        // Exit command mode
+        rnbd350.uart_write((uint8_t*)"---\r", 4);
+
+        LOG_DEBUG("BLE_ENABLED");
+        ble_initialized = true;
+    } else {
+        LOG_DEBUG("BLE_INIT_FAILED");
+    }
+
+    __set_PRIMASK(primask);
 }
+
 
 void resetRows(void){
 	// Configure GPIO for rows
@@ -761,7 +821,6 @@ void logger_output(const char *message) {
     uint32_t primask;
     uint16_t len = strlen(message);
 
-    // Critical section - disable interrupts
     primask = __get_PRIMASK();
     __disable_irq();
 
@@ -788,7 +847,6 @@ void logger_output(const char *message) {
         }
     }
 
-    // Restore interrupt state
     __set_PRIMASK(primask);
 }
 
@@ -802,7 +860,6 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
         // Critical section
         __disable_irq();
 
-        // If we have more messages, send next one
         if (log_queue.buffer_count > 0) {
             log_queue.buffer_count--;
             log_queue.read_index = (log_queue.read_index + 1) % LOG_BUFFER_COUNT;

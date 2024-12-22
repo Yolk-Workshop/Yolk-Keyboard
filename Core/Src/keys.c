@@ -91,10 +91,7 @@ uint8_t getCurrentLayer(void) {
 void clearReport(void) {
 	kb_state.fn_pressed = false;
 	kb_state.swap_active = false;
-	//kb_state.key_count = 0;
 	kb_state.current_layer = 0;
-	//memset(&kb_state.last_report, 0, sizeof(last_report_t));
-	//memset(&kb_state.current_report, 0, sizeof(hid_report_t));
 }
 
 void resetKeyboardState(void) {
@@ -106,14 +103,14 @@ static void handleKeyPress(uint8_t keycode) {
     if (kb_state.key_count < 6) {
         // Add key to 6KRO buffer
         kb_state.current_report.keys[kb_state.key_count++] = keycode;
-        LOG_DEBUG("6KRO-Press KC:0x%02X IDX:%u", keycode, kb_state.key_count - 1);
+        //LOG_DEBUG("6KRO-Press KC:0x%02X IDX:%u", keycode, kb_state.key_count - 1);
     } else {
         // Handle NKRO
         uint8_t byte = keycode / 8;
         uint8_t bit = keycode % 8;
         if (byte < NKRO_EXT_SIZE) {
             kb_state.current_report.ext_key[byte] |= (1 << bit);
-            LOG_DEBUG("NKRO-Press Bitset: %u Byte:%u KC:0x%02X", bit, byte, keycode);
+            //LOG_DEBUG("NKRO-Press Bitset: %u Byte:%u KC:0x%02X", bit, byte, keycode);
         }
     }
 }
@@ -150,10 +147,10 @@ static void handleKeyRelease(uint8_t keycode) {
 static void handleModifiers(uint8_t keycode, bool pressed) {
     if (pressed) {
         kb_state.current_report.modifiers |= getModifierBit(keycode);
-        LOG_DEBUG("Modifier Pressed: KC:0x%02X", keycode);
+        //LOG_DEBUG("Modifier Pressed: KC:0x%02X", keycode);
     } else {
         kb_state.current_report.modifiers &= ~getModifierBit(keycode);
-        LOG_DEBUG("Modifier Released: KC:0x%02X", keycode);
+        //LOG_DEBUG("Modifier Released: KC:0x%02X", keycode);
     }
 
     report_ready_flag = 1;
@@ -173,7 +170,7 @@ void processKey(uint8_t row, uint8_t col, bool pressed) {
     uint8_t keycode = layers[getCurrentLayer()][row][col];
     if (keycode == KC_NO) return;
 
-    LOG_DEBUG("KB:[%u][%u]-KC:0x%02X", row, col, keycode);
+    //LOG_DEBUG("KB:[%u][%u]-KC:0x%02X", row, col, keycode);
 
     if (isModifier(keycode)) {
         handleModifiers(keycode, pressed);
@@ -187,7 +184,7 @@ void processKey(uint8_t row, uint8_t col, bool pressed) {
 
 keystate_t handleIdle(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
     if (col_pressed) {
-        LOG_DEBUG("Key [%u][%u] DEBOUNCED", row, col);
+        //LOG_DEBUG("Key [%u][%u] DEBOUNCED", row, col);
         last_change_time[row][col] = current_time;
         return KEY_DEBOUNCE;
     }
@@ -196,7 +193,7 @@ keystate_t handleIdle(uint8_t row, uint8_t col, bool col_pressed, uint32_t curre
 
 keystate_t handleDebounce(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
     if (col_pressed && (current_time - last_change_time[row][col] > DEBOUNCE_TIME_US)) {
-        LOG_DEBUG("Key [%u][%u] PRESSED", row, col);
+        //LOG_DEBUG("Key [%u][%u] PRESSED", row, col);
         processKey(row, col, true); // Key pressed
         return KEY_PRESSED;
     }
@@ -208,7 +205,7 @@ keystate_t handleDebounce(uint8_t row, uint8_t col, bool col_pressed, uint32_t c
 
 keystate_t handlePressed(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
     if (!col_pressed) {
-        LOG_DEBUG("Key [%u][%u] RELEASED", row, col);
+        //LOG_DEBUG("Key [%u][%u] RELEASED", row, col);
         processKey(row, col, false); // Key released
         return KEY_RELEASED;
     }
@@ -217,7 +214,7 @@ keystate_t handlePressed(uint8_t row, uint8_t col, bool col_pressed, uint32_t cu
 
 keystate_t handleHeld(uint8_t row, uint8_t col, bool col_pressed, uint32_t current_time) {
     if (!col_pressed) {
-        LOG_DEBUG("Key [%u][%u] RELEASED", row, col);
+        //LOG_DEBUG("Key [%u][%u] RELEASED", row, col);
         processKey(row, col, false); // Key released
         return KEY_RELEASED;
     }
