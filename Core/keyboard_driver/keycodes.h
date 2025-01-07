@@ -7,8 +7,8 @@
  * Based on USB HID Usage Tables v1.12 (October 28, 2004)
  */
 
-#ifndef INC_KEYCODES_H_
-#define INC_KEYCODES_H_
+#ifndef KEYBOARD_DRIVER_KEYCODES_H_
+#define KEYBOARD_DRIVER_KEYCODES_H_
 
 typedef enum {
     // Reserved (0x00-0x03)

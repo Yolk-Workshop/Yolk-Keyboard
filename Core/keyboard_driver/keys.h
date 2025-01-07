@@ -5,8 +5,8 @@
  * Author: bettysidepiece
  */
 
-#ifndef INC_KEYS_H_
-#define INC_KEYS_H_
+#ifndef KEYBOARD_DRIVER_KEYS_H_
+#define KEYBOARD_DRIVER_KEYS_H_
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -21,7 +21,7 @@
 #define NKRO_SIZE 6
 #define NKRO_EXT_SIZE 8
 
-#define DEBOUNCE_TIME_US 600
+#define DEBOUNCE_TIME_US 650
 
 typedef enum {
     KEY_IDLE,

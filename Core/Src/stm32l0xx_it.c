@@ -56,13 +56,12 @@
 
 /* External variables --------------------------------------------------------*/
 extern PCD_HandleTypeDef hpcd_USB_FS;
-extern DMA_HandleTypeDef hdma_lpuart1_rx;
-extern DMA_HandleTypeDef hdma_lpuart1_tx;
 
 /* USER CODE BEGIN EV */
 
 extern DMA_HandleTypeDef hdma_usart2_tx;
 extern UART_HandleTypeDef huart2;
+extern UART_HandleTypeDef hlpuart1;
 extern TIM_HandleTypeDef htim3;
 
 extern volatile uint8_t scan_flag;
@@ -150,23 +149,20 @@ void SysTick_Handler(void)
 /**
   * @brief This function handles DMA1 channel 2 and channel 3 interrupts.
   */
-void DMA1_Channel2_3_IRQHandler(void)
-{
-  HAL_DMA_IRQHandler(&hdma_lpuart1_tx);
-  HAL_DMA_IRQHandler(&hdma_lpuart1_rx);
-
-}
-
 
 void DMA1_Channel4_5_6_7_IRQHandler(void)
 {
-  HAL_DMA_IRQHandler(&hdma_usart2_tx);
+	HAL_DMA_IRQHandler(&hdma_usart2_tx);
 }
 
 void USART2_IRQHandler(void)
 {
-  HAL_UART_IRQHandler(&huart2);
+	HAL_UART_IRQHandler(&huart2);
+}
 
+void RNG_LPUART1_IRQHandler(void)
+{
+	HAL_UART_IRQHandler(&hlpuart1);
 }
 
 void TIM3_IRQHandler(void) {
