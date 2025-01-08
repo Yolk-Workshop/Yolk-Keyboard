@@ -34,11 +34,15 @@ UART_HandleTypeDef huart2;
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
 DMA_HandleTypeDef hdma_usart2_tx;
+DMA_HandleTypeDef hdma_lpuart1_rx;
+DMA_HandleTypeDef hdma_lpuart1_tx;
+
 extern USBD_HandleTypeDef hUsbDeviceFS;
+extern uint8_t dma_rx_buffer[RX_BUFFER_SIZE];
+
 
 static log_buffer_t log_queue = {0};
 void logger_output(const char *message);
-
 
 
 /**
@@ -50,7 +54,7 @@ int main(void)
     /* MCU Configuration--------------------------------------------------------*/
     HAL_Init();
     SystemClock_Config();
-
+    LOG_INFO("System Reset");
     /* Initialize all configured peripherals */
     MX_GPIO_Init();
     MX_DMA_Init();
@@ -236,6 +240,7 @@ static void MX_TIM2_Init(void)
 
 
 /* UART/USART Initialization Functions -------------------------------------*/
+/* UART/USART Initialization Functions -------------------------------------*/
 void MX_LPUART1_UART_Init(void)
 {
     hlpuart1.Instance = LPUART1;
@@ -251,13 +256,21 @@ void MX_LPUART1_UART_Init(void)
     if (HAL_UART_Init(&hlpuart1) != HAL_OK) {
         Error_Handler();
     }
+
+    /* Enable DMA for UART RX */
+    if (HAL_UART_Receive_DMA(&hlpuart1, dma_rx_buffer, RX_BUFFER_SIZE) != HAL_OK) {
+        Error_Handler();
+    }
+
+    // Enable IDLE line detection interrupt
+   __HAL_UART_ENABLE_IT(&hlpuart1, UART_IT_IDLE);
 }
 
 
 static void MX_USART2_UART_Init(void)
 {
     huart2.Instance = USART2;
-    huart2.Init.BaudRate = 115200;
+    huart2.Init.BaudRate = 230400;
     huart2.Init.WordLength = UART_WORDLENGTH_8B;
     huart2.Init.StopBits = UART_STOPBITS_1;
     huart2.Init.Parity = UART_PARITY_NONE;
@@ -333,9 +346,10 @@ static void MX_DMA_Init(void)
     __HAL_RCC_DMA1_CLK_ENABLE();
 
     /* DMA interrupt init */
-    HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 2);
     HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
-    HAL_NVIC_SetPriority(DMA1_Channel4_5_6_7_IRQn, 0, 1);
+
+    HAL_NVIC_SetPriority(DMA1_Channel4_5_6_7_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(DMA1_Channel4_5_6_7_IRQn);
 }
 
@@ -357,6 +371,7 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_WritePin(LMAT_RESET_GPIO_Port, LMAT_RESET_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(LMAT_SDB_GPIO_Port, LMAT_SDB_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOC, UART_MODE_SW_Pin|EEPROM_WC_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, BT_RESET_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(GPIOD, R0_Pin|R1_Pin|R2_Pin|R3_Pin|R4_Pin|R5_Pin, GPIO_PIN_SET);
 
     /* Configure Column Pins */
@@ -394,6 +409,44 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+    /*Configure GPIO pin : LMAT_SDB_Pin */
+    GPIO_InitStruct.Pin = LMAT_SDB_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(LMAT_SDB_GPIO_Port, &GPIO_InitStruct);
+
+    /*Configure GPIO pins : UART_MODE_SW_Pin EEPROM_WC_Pin */
+    GPIO_InitStruct.Pin = UART_MODE_SW_Pin|EEPROM_WC_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = BT_RESET_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = BT_RX_INPUT_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    /*Configure GPIO pins : BT_RX_INPUT_Pin AMB_I2C_INT_Pin BT_RESET_Pin BT_TX_ALERT_Pin */
+    GPIO_InitStruct.Pin = AMB_I2C_INT_Pin|BT_TX_ALERT_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    /*Configure GPIO pin : BT_PAIR_SW_Pin */
+    GPIO_InitStruct.Pin = BT_PAIR_SW_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(BT_PAIR_SW_GPIO_Port, &GPIO_InitStruct);
 
     /* Configure Row Output Pins */
     GPIO_InitStruct.Pin = R0_Pin|R1_Pin|R2_Pin|R3_Pin|R4_Pin|R5_Pin;
@@ -463,11 +516,10 @@ void logger_output(const char *message)
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    uint16_t len;
-
     if (huart == &huart2) {
         uart2_tc_flag = SET;
         log_queue.dma_busy = 0;
+        uint16_t len;
 
         // Critical section
         __disable_irq();
@@ -486,8 +538,29 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
                 }
             }
         }
-
         __enable_irq();
+
+    } else if (huart == &hlpuart1) {
+
+		// Clear any pending transmission flags if necessary
+		if (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC)) {
+			__HAL_UART_CLEAR_FLAG(huart, UART_FLAG_TC);
+
+			//ATOMIC_SET_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
+			tx_irq_handler();
+			//ATOMIC_SET_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
+			//LOG_DEBUG("DMA TX Complete for hlpuart1");
+		}
+    }
+}
+
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if (huart == &hlpuart1)
+	{
+		rx_irq_handler();
+		//LOG_DEBUG("DMA RX Complete for hlpuart1");
     }
 }
 /**
@@ -497,6 +570,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 void Error_Handler(void)
 {
     LOG_DEBUG("Hard-fault Occurred!\n");
+    HAL_Delay(1000);
     __disable_irq();
     while (1) {
         HAL_NVIC_EnableIRQ(USART2_IRQn);

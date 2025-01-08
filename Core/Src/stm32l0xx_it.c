@@ -19,6 +19,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "logger.h"
 #include "stm32l0xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -61,7 +62,11 @@ extern PCD_HandleTypeDef hpcd_USB_FS;
 
 extern DMA_HandleTypeDef hdma_usart2_tx;
 extern UART_HandleTypeDef huart2;
+
+extern DMA_HandleTypeDef hdma_lpuart1_rx;
+extern DMA_HandleTypeDef hdma_lpuart1_tx;
 extern UART_HandleTypeDef hlpuart1;
+
 extern TIM_HandleTypeDef htim3;
 
 extern volatile uint8_t scan_flag;
@@ -150,6 +155,12 @@ void SysTick_Handler(void)
   * @brief This function handles DMA1 channel 2 and channel 3 interrupts.
   */
 
+void DMA1_Channel2_3_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_lpuart1_tx);
+  HAL_DMA_IRQHandler(&hdma_lpuart1_rx);
+}
+
 void DMA1_Channel4_5_6_7_IRQHandler(void)
 {
 	HAL_DMA_IRQHandler(&hdma_usart2_tx);
@@ -162,6 +173,12 @@ void USART2_IRQHandler(void)
 
 void RNG_LPUART1_IRQHandler(void)
 {
+	if(__HAL_UART_GET_FLAG(&hlpuart1, UART_FLAG_IDLE)) {
+	        __HAL_UART_CLEAR_IDLEFLAG(&hlpuart1);
+	        //LOG_DEBUG("Idle Line");
+	        rx_irq_handler();
+	    }
+
 	HAL_UART_IRQHandler(&hlpuart1);
 }
 

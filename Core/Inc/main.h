@@ -62,7 +62,15 @@ extern volatile ITStatus uart2_tc_flag;
 void SystemClock_Config(void);
 void Error_Handler(void);
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+
+/*BLE UART Prototypes*/
 void MX_LPUART1_UART_Init(void);
+bool uart_transmit_ready(void);
+bool uart_data_ready(void);
+void uart_write(uint8_t data);
+uint8_t uart_read(void);
+void tx_irq_handler(void);
+void rx_irq_handler(void);
 
 /* Keyboard Matrix State */
 extern const uint16_t row_pins[KEY_ROWS];

@@ -30,7 +30,6 @@ bool uart_data_ready(void);
 void uart_write_wrapper(void);
 
 // Bluetooth-related functions
-void resetRNBD350(bool state);
 void initBluetooth(void);
 
 // Keyboard-related functions

@@ -63,70 +63,113 @@ uint32_t elapsedTime(uint32_t start_time)
     }
 }
 
-// UART helper functions
-bool uart_transmit_ready(void)
-{
-    return ((LPUART1->ISR & UART_FLAG_TXE) == (UART_FLAG_TXE));
-}
-
-bool uart_data_ready(void)
-{
-    return ((LPUART1->ISR & UART_FLAG_RXNE) == (UART_FLAG_RXNE));
-}
-
-void uart_write_wrapper(void)
-{
-    // Implementation placeholder
-}
-
-void uart_read_wrapper(void)
-{
-
-}
-
 
 // Bluetooth-related functions
-void resetRNBD350(bool state)
+static void resetRNBD350(bool state)
 {
     if (state) {
-        GPIOC->ODR &= ~BT_RESET_Pin;
+    	RNBD.gpio.reset_port->ODR &= ~RNBD.gpio.reset_pin ;
         LOG_DEBUG("RNBD350 Reset asserted (LOW)");
     } else {
-        GPIOC->ODR |= BT_RESET_Pin;
+    	RNBD.gpio.reset_port->ODR |= RNBD.gpio.reset_pin ;
         LOG_DEBUG("RNBD350 Reset released (HIGH)");
 
-        if ((GPIOC->ODR & BT_RESET_Pin) != BT_RESET_Pin) {
+        if ((RNBD.gpio.reset_port->ODR & RNBD.gpio.reset_pin ) != RNBD.gpio.reset_pin ) {
             LOG_ERROR("ERR: Reset pin failed to release");
         }
     }
 }
 
 
+static void RxIndicate(bool value)
+{
+	if (value) {
+		RNBD.gpio.wakeup_port->ODR |= RNBD.gpio.wakeup_pin ;
+		LOG_DEBUG("RNBD350 Reset asserted (LOW)");
+	} else {
+		RNBD.gpio.wakeup_port->ODR &= ~RNBD.gpio.wakeup_pin ;
+		LOG_DEBUG("RNBD350 Reset released (HIGH)");
+
+		if ((RNBD.gpio.reset_port->ODR & RNBD.gpio.wakeup_pin ) != RNBD.gpio.wakeup_pin ) {
+			LOG_ERROR("ERR: Reset pin failed to release");
+		}
+	}
+}
+
+
+static void setBLEMode(RNBD_sys_modes_t mode)
+{
+	LOG_DEBUG("FAULT DETECTED FUNCT PTR BUG");
+}
+
+
+static void initBLEhardware(){
+    RNBD.gpio.reset_pin 	=	 BT_RESET_Pin;
+	RNBD.gpio.reset_port 	=	 BT_RESET_GPIO_Port;
+	RNBD.gpio.wakeup_pin 	=	 BT_RX_INPUT_Pin;
+	RNBD.gpio.wakeup_port 	=	 BT_RX_INPUT_GPIO_Port;
+	RNBD.gpio.status1_pin 	=	 BLE_STAT1_Pin;
+	RNBD.gpio.status1_port 	=	 BLE_STAT1_GPIO_Port;
+	RNBD.gpio.status2_pin 	=	 BLE_STAT2_Pin;
+	RNBD.gpio.status2_port 	=	 BLE_STAT2_GPIO_Port;
+}
+
+
+static void setBLECallbacks(void){
+	RNBD.callback.delayMs = HAL_Delay;
+	RNBD.callback.read = uart_read;
+	RNBD.callback.write = uart_write;
+	RNBD.callback.transmitReady = uart_transmit_ready;
+	RNBD.callback.dataReady = uart_data_ready;
+	RNBD.callback.resetModule = resetRNBD350;
+	RNBD.callback.asyncHandler = asyncMessageHandler;
+	RNBD.callback.rxIndicate = RxIndicate;
+	RNBD.callback.systemModeset = setBLEMode;
+}
+
+
 void initBluetooth(void)
 {
-    LOG_DEBUG("BLE initialization started");
+    LOG_DEBUG("BLE initialisation started");
 
     USBD_DeInit(&hUsbDeviceFS);
     LOG_INFO("USB Disabled");
 
     MX_LPUART1_UART_Init();
-    LOG_DEBUG("LPUART Initialized Successfully");
+    LOG_DEBUG("LPUART Initialised Successfully");
+
+    initBLEhardware();
+    setBLECallbacks();
 
     if(RNBD_Init()) {
-        LOG_DEBUG("RNBD Initialized Successfully");
+        LOG_DEBUG("Setting Up Device Configuration");
 
         if(RNBD_EnterCmdMode()) {
-            RNBD_SetName((const uint8_t*)"Yolk_Keyboard", 12);
-            RNBD_SetServiceBitmap(0x44);
+        	LOG_DEBUG("Command Mode Entered");
+
+            if (RNBD_SetName((const uint8_t*)"Yolk_Keyboard", 13)){
+            	LOG_DEBUG("BLE Device Name Set");
+            	RNBD.callback.delayMs(100);
+            }
+            if(RNBD_SetServiceBitmap(0x44)){
+            	LOG_DEBUG("BLE HID Mode set");
+            	RNBD.callback.delayMs(100);
+            };
+            if(RNBD_EnableAdvertising()){
+            	LOG_DEBUG("BLE Advertising");
+            	RNBD.callback.delayMs(100);
+            }
             RNBD_EnterDataMode();
 
             kb_state.output_mode = OUTPUT_BLE;
-            LOG_INFO("Bluetooth initialization successful");
+            LOG_INFO("Bluetooth Initialisation Passed");
+
+            RNBD.callback.delayMs(100);
             return;
         }
     }
 
-    LOG_WARNING("Bluetooth Initialization failed");
+    LOG_WARNING("Bluetooth Initialisation failed");
 }
 
 
