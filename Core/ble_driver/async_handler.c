@@ -58,6 +58,10 @@ static inline void RNBD_PrintMessageEnd(void)
 
 static inline void RNBD_PrintIndicatorCharacters(RNBD_MESSAGE_TYPE messageType)
 {
+	if(!messageType){
+		return;
+	}
+
     if (DISCONNECT_MSG == messageType)
     {
         LOG_INFO("[");

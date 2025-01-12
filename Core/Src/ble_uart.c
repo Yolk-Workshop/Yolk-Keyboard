@@ -11,14 +11,10 @@
 #include <main.h>
 
 
-#define UART_RX_BUFFER_SIZE 128
+#define UART_RX_BUFFER_SIZE 256
 #define UART_TX_BUFFER_SIZE 128
 #define UART_RX_BUFFER_MASK (UART_RX_BUFFER_SIZE - 1)
 #define UART_TX_BUFFER_MASK (UART_TX_BUFFER_SIZE - 1)
-
-// Ensure buffer sizes are powers of 2
-//_static_assert((UART_RX_BUFFER_SIZE & UART_RX_BUFFER_MASK) == 0, "RX buffer size must be a power of 2");
-//_Static_assert((UART_TX_BUFFER_SIZE & UART_TX_BUFFER_MASK) == 0, "TX buffer size must be a power of 2");
 
 // UART Buffers
 static volatile uint8_t uart_rx_buffer[UART_RX_BUFFER_SIZE];
@@ -46,7 +42,6 @@ uint8_t dma_tx_buffer[UART_TX_BUFFER_SIZE];
 
 void tx_irq_handler(void) {
     __disable_irq();
-    //ATOMIC_CLEAR_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
 
     if(uart_tx_tail != uart_tx_head) {
         uint16_t next_tail = (uart_tx_tail + 1) & UART_TX_BUFFER_MASK;
@@ -62,7 +57,6 @@ void tx_irq_handler(void) {
 void rx_irq_handler(void) {
     __disable_irq();
     ATOMIC_CLEAR_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
-
     // Get actual bytes received
     uint16_t dma_count = __HAL_DMA_GET_COUNTER(&hdma_lpuart1_rx);
     uint16_t bytes_received = UART_RX_BUFFER_SIZE - dma_count;
@@ -76,11 +70,11 @@ void rx_irq_handler(void) {
             uart_rx_count++;
         }
         else {
+        	LOG_DEBUG("Data: %s", uart_rx_buffer);
             LOG_WARNING("RX Buffer overflow");
             break;
         }
     }
-
     // Restart DMA reception
     HAL_UART_AbortReceive(&hlpuart1);
     if(HAL_UART_Receive_DMA(&hlpuart1, dma_rx_buffer, UART_RX_BUFFER_SIZE) != HAL_OK) {
@@ -96,7 +90,7 @@ void rx_irq_handler(void) {
 // UART helper functions
 bool uart_transmit_ready(void)
 {
-	LOG_DEBUG("DMA TX State: %d", HAL_DMA_GetState(&hdma_lpuart1_tx));
+	printf("DMA TX State: %d", HAL_DMA_GetState(&hdma_lpuart1_tx));
 	return (HAL_DMA_GetState(&hdma_lpuart1_tx) == HAL_DMA_STATE_READY);
 }
 
@@ -106,7 +100,7 @@ bool uart_data_ready(void) {
     bool current_state = (uart_rx_count > 0);
 
     if(current_state != last_state) {
-        LOG_DEBUG("UART RX state changed: %d", uart_rx_count);
+        printf("UART RX state changed: %d", uart_rx_count);
         last_state = current_state;
     }
 
@@ -115,9 +109,6 @@ bool uart_data_ready(void) {
 
 
 void uart_write(uint8_t data) {
-    //LOG_DEBUG("UART WRITE ENTER");
-    __disable_irq();
-
     // Store in ring buffer
     uint16_t next_head = (uart_tx_head + 1) & UART_TX_BUFFER_MASK;
     if(next_head != uart_tx_tail) {
@@ -131,15 +122,11 @@ void uart_write(uint8_t data) {
             HAL_UART_Transmit_DMA(&hlpuart1, dma_tx_buffer, 1);
         }
     }
-
-    __enable_irq();
-    //LOG_DEBUG("UART WRITE EXIT");
 }
 
 
 uint8_t uart_read(void) {
     uint8_t read = 0;
-
     // Disable IDLE line interrupt during read
     ATOMIC_CLEAR_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
 
@@ -152,9 +139,7 @@ uint8_t uart_read(void) {
         LOG_WARNING("RX buffer empty");
     }
 
-    // Re-enable IDLE line after read complete
     ATOMIC_SET_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
-    //LOG_DEBUG("R:%c", read);
     return read;
 }
 

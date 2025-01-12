@@ -20,8 +20,8 @@ extern "C" {
 #include "../keyboard_driver/kb_driver.h"
 #include "../keyboard_driver/keys.h"
 #include "../keyboard_driver/keycodes.h"
-#include "../rnbd/rnbd_interface.h"
-#include "../rnbd/rnbd.h"
+#include "../ble_driver/rnbd_interface.h"
+#include "../ble_driver/rnbd.h"
 
 #include "logger.h"
 #include "usb_device.h"
@@ -47,6 +47,7 @@ extern I2C_HandleTypeDef hi2c2;
 /* Keyboard State */
 extern keyboard_state_t kb_state;
 extern rnbd_interface_t RNBD;
+extern volatile uint8_t ble_conn_flag;
 
 /* Exported Constants ------------------------------------------------------*/
 /* Matrix Dimensions */

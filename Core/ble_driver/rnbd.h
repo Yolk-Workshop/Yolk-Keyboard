@@ -5,14 +5,18 @@
  *      Author: bettysidepiece
  */
 
-#ifndef RNBD_RNBD_H_
-#define RNBD_RNBD_H_
+#ifndef BLE_DRIVER_RNBD_H_
+#define BLE_DRIVER_RNBD_H_
 /**
  * RNBD Generated Driver API Header File
  *
  * @file rnbd.h
  *
  * @defgroup  rnbd RNBD
+ *
+ * The original code has been modified and adapted for use on the :
+ * STM32L02 Micro-controller
+ * Yolk Keyboard
  *
  * @brief This is the generated header file for the RNBD driver
  *
@@ -44,7 +48,9 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include "rnbd_interface.h"
+
 /**
  * @ingroup rnbd
  * @def RNBD_RESET_DELAY_TIME
@@ -57,23 +63,26 @@
 #define RNBD_MAX_CMD_SIZE          64
 #define RNBD_RESET_DELAY_TIME         (1)
 #define RNBD_STARTUP_DELAY            (300)
+
 #define NIBBLE2ASCII(nibble) (((((nibble) & 0x0F) < 0x0A) ? ((nibble) & 0x0F) + '0' : ((nibble) & 0x0F) + 0x57))
 
+#define RNBD_DRIVER_VERSION_LEN 	5  // length of "2.0.0"
+#define VENDOR_NAME_LEN 			13         // length of "Yolk Workshop"
+#define PRODUCT_NAME_LEN 			13        // length of "Yolk Keyboard"
+#define HW_VERSION_LEN 				5          // length of "0.1.0"
+#define SW_VERSION_LEN 				5          // length of "0.0.5"
 
-extern rnbd_interface_t RNBD;
 
-#define RNBD_DRIVER_VERSION_LEN 5  // length of "2.0.0"
-#define VENDOR_NAME_LEN 13         // length of "Yolk Workshop"
-#define PRODUCT_NAME_LEN 13        // length of "Yolk Keyboard"
-#define HW_VERSION_LEN 5          // length of "0.1.0"
-#define SW_VERSION_LEN 5          // length of "0.0.5"
-
-extern const uint8_t RNBD_driver_version[]; /**<  Current RNBD Driver Version */
-extern const uint8_t VENDOR_NAME[];
-extern const uint8_t PRODUCT_NAME[];
-extern const uint8_t HW_VERSION[];
-extern const uint8_t SW_VERSION[];
-extern const uint16_t BLE_SDA_HID;
+// Define individual bits as enum
+typedef enum {
+    PROPERTY_READ           = 0x02,
+    PROPERTY_WRITE_NO_ACK  	= 0x04,
+    PROPERTY_WRITE         	= 0x08,
+    PROPERTY_NOTIFY        	= 0x10,
+    PROPERTY_INDICATE      	= 0x20,
+    PROPERTY_AUTHENTICATED 	= 0x40,
+    PROPERTY_BROADCAST     	= 0x80
+} gatt_property_bits_t;
 
 /**
  * @ingroup rnbd
@@ -218,6 +227,27 @@ typedef union
 }rnbd_gpio_bitmap_t;
 
 
+
+//RNBD350 Instance
+extern rnbd_interface_t RNBD;
+
+//RNBD350 GATT functions
+bool GATT_ble_Init(void);
+void GATT_List_Services(void);
+bool GATT_clearProfile(void);
+bool GATT_defineService(const uint8_t *uuid, uint8_t uuidLen);
+bool GATT_defineCharacteristic(const uint8_t *uuid, uint8_t uuidLen, uint8_t properties, uint8_t maxSize);
+bool GATT_writeCharacteristic(const uint8_t *handle, const uint8_t *data, uint8_t dataLen);
+void GATT_readCharacteristic(const uint8_t* handle, uint8_t dataLen);
+bool GATT_transmitCharacteristic(const uint8_t* handle, const uint8_t* data, uint8_t dataLen);
+bool GATT_sendHIDReport(const uint8_t *data, uint8_t dataLen);
+bool GATT_configureCCCD(const uint8_t *handle, bool notifications, bool indications);
+void GATT_updateLEDState(uint8_t ledBitmap);
+
+
+//RNBD350 Command Functions
+bool RNBD_ServiceChangeIndicator(void);
+bool RNBD_SendData(uint8_t* data, uint16_t len);
 bool RNBD_SetAppearance(uint16_t appearanceCode);
 bool RNBD_ConnectToLastBondedDevice(void);
 bool RNBD_SetHWVersion(const uint8_t *hardwareVersion);
@@ -230,16 +260,6 @@ bool RNBD_SetVendorName(const uint8_t *name, uint8_t nameLen);
 bool RNBD_StopAdvertising(void);
 bool RNBD_EnableAdvertising(void);
 bool RNBD_SetFastAdvertisementParameters(uint16_t fastAdvInterval, uint16_t fastAdvTimeout, uint16_t slowAdvInterval);
-void asyncMessageHandler(char* message);
-bool RNBD_Init(void);
-void RNBD_SendCmd(const uint8_t *cmd, uint8_t cmdLen);
-uint8_t RNBD_GetCmd(const uint8_t *getCmd, uint8_t getCmdLen);
-bool RNBD_ReadMsg(const uint8_t *expectedMsg, uint8_t msgLen);
-bool RNBD_ReadDefaultResponse(void);
-bool RNBD_SendCommand_ReceiveResponse(const uint8_t *cmdMsg, uint8_t cmdLen, const uint8_t *responsemsg, uint8_t responseLen);
-bool RNBD_EnterCmdMode(void);
-bool RNBD_EnterDataMode(void);
-uint16_t RNBD_GetGRCommand(void);
 bool RNBD_SetName(const uint8_t *name, uint8_t nameLen);
 bool RNBD_SetBaudRate(uint8_t baudRate);
 bool RNBD_SetServiceBitmap(uint8_t serviceBitmap);
@@ -255,10 +275,25 @@ bool RNBD_FactoryReset(RNBD_FACTORY_RESET_MODE_t resetMode);
 bool RNBD_Disconnect(void);
 bool RNBD_AsyncMessageHandlerSet(char* pBuffer, uint8_t len);
 bool RNBD_isDataReady(void);
+bool RNBD_isConnected(void);
+void RNBD_Reset(void);
+
+
+//RNBD350 System Functions
+bool RNBD_Init(void);
+void RNBD_SendCmd(const uint8_t *cmd, uint8_t cmdLen);
+uint8_t RNBD_GetCmd(const uint8_t *getCmd, uint8_t getCmdLen);
+bool RNBD_ReadMsg(const uint8_t *expectedMsg, uint8_t msgLen);
+bool RNBD_ReadDefaultResponse(void);
+bool RNBD_SendCommand_ReceiveResponse(const uint8_t *cmdMsg, uint8_t cmdLen, const uint8_t *responsemsg, uint8_t responseLen);
+bool RNBD_EnterCmdMode(void);
+bool RNBD_EnterDataMode(void);
+uint16_t RNBD_GetGRCommand(void);
 uint8_t RNBD_Read(void);
 void RNBD_set_StatusDelimter(char Delimter_Character);
 char RNBD_get_StatusDelimter();
 void RNBD_set_NoDelimter(bool value);
 bool RNBD_get_NoDelimter();
+void asyncMessageHandler(char* message);
 
-#endif /* RNBD_RNBD_H_ */
+#endif /* BLE_DRIVER_RNBD_H_ */

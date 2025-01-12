@@ -7,8 +7,6 @@
 #include "kb_driver.h"
 #include "usbd_core.h"
 
-
-
 // External declarations
 extern TIM_HandleTypeDef htim21;
 extern UART_HandleTypeDef hlpuart1;
@@ -17,6 +15,8 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 extern keyboard_state_t kb_state;
 extern StateHandler stateMachine[5];
 extern rnbd_interface_t RNBD;
+
+volatile uint8_t ble_conn_flag = false;
 
 const uint16_t row_pins[KEY_ROWS] = {R0_Pin, R1_Pin, R2_Pin, R3_Pin, R4_Pin, R5_Pin};
 
@@ -103,7 +103,8 @@ static void setBLEMode(RNBD_sys_modes_t mode)
 }
 
 
-static void initBLEhardware(){
+static void initBLEhardware()
+{
     RNBD.gpio.reset_pin 	=	 BT_RESET_Pin;
 	RNBD.gpio.reset_port 	=	 BT_RESET_GPIO_Port;
 	RNBD.gpio.wakeup_pin 	=	 BT_RX_INPUT_Pin;
@@ -115,7 +116,8 @@ static void initBLEhardware(){
 }
 
 
-static void setBLECallbacks(void){
+static void setBLECallbacks(void)
+{
 	RNBD.callback.delayMs = HAL_Delay;
 	RNBD.callback.read = uart_read;
 	RNBD.callback.write = uart_write;
@@ -125,6 +127,18 @@ static void setBLECallbacks(void){
 	RNBD.callback.asyncHandler = asyncMessageHandler;
 	RNBD.callback.rxIndicate = RxIndicate;
 	RNBD.callback.systemModeset = setBLEMode;
+	RNBD.callback.getConnStatus = RNBD_isConnected;
+}
+
+
+static void setDevice_descriptor(void)
+{
+	RNBD.device.vendorName = (const uint8_t *)"Yolk-Workshop";
+	RNBD.device.productName = (const uint8_t *)"Yolk-Keyboard";
+	RNBD.device.hwVersion = (const uint8_t *)"0.1";
+	RNBD.device.fwVersion = (const uint8_t *)"0.2";
+	RNBD.device.driverVersion = (const uint8_t *)"2.0.0";
+	RNBD.device.bleSdaHid = 0x03C1; // BLE HID
 }
 
 
@@ -140,6 +154,7 @@ void initBluetooth(void)
 
     initBLEhardware();
     setBLECallbacks();
+    setDevice_descriptor();
 
     if(RNBD_Init()) {
         LOG_DEBUG("Setting Up Device Configuration");
@@ -147,24 +162,56 @@ void initBluetooth(void)
         if(RNBD_EnterCmdMode()) {
         	LOG_DEBUG("Command Mode Entered");
 
-            if (RNBD_SetName((const uint8_t*)"Yolk_Keyboard", 13)){
-            	LOG_DEBUG("BLE Device Name Set");
-            	RNBD.callback.delayMs(100);
-            }
-            if(RNBD_SetServiceBitmap(0x44)){
-            	LOG_DEBUG("BLE HID Mode set");
-            	RNBD.callback.delayMs(100);
-            };
-            if(RNBD_EnableAdvertising()){
-            	LOG_DEBUG("BLE Advertising");
-            	RNBD.callback.delayMs(100);
-            }
-            RNBD_EnterDataMode();
+        	RNBD_StopAdvertising();
+            RNBD_SetName(RNBD.device.productName, PRODUCT_NAME_LEN);
 
-            kb_state.output_mode = OUTPUT_BLE;
-            LOG_INFO("Bluetooth Initialisation Passed");
+            //GATT Service Settings
+            RNBD_SetAppearance(RNBD.device.bleSdaHid);
+
+            // Switch to Transparent UART/ Device Info mode
+            if(RNBD_SetServiceBitmap(0xC0)){
+				LOG_DEBUG("BLE HID Mode set");
+				//Verify the change
+				RNBD_ServiceChangeIndicator();
+				RNBD_SetHWVersion(RNBD.device.hwVersion);
+				RNBD_SetFWVersion(RNBD.device.fwVersion);
+				RNBD_SetModelName(RNBD.device.productName);
+				RNBD_SetMakerName(RNBD.device.vendorName);
+				LOG_DEBUG("Configuring HID GATT Profile");
+			}
 
             RNBD.callback.delayMs(100);
+			if(!GATT_ble_Init()){
+				LOG_ERROR("Bluetooth GATT HID profile configuration failed");
+
+				 if(!RNBD_FactoryReset(SF_2)){
+					LOG_ERROR("Factory Reset Failed");
+					LOG_WARNING("Hard Reset in 3 Seconds");
+					RNBD.callback.delayMs(3000); // Allow module to reboot
+					NVIC_SystemReset();
+				}
+
+				RNBD.callback.delayMs(2000); // Allow module to reboot
+				LOG_INFO("Re-attempting Initialisation After Factory Reset");
+				initBluetooth(); // Restart initialisation
+				return;
+			}
+
+			if(RNBD_ServiceChangeIndicator()){
+				LOG_DEBUG("BLE Service Changed");
+			}
+
+			GATT_List_Services();
+			RNBD_EnableAdvertising();
+
+            //RNBD_EnterDataMode();
+            RNBD.device.connection_timer = BLE_DEFAULT_TIMER;
+            ble_conn_flag = RESET;
+            RNBD.connected = RESET;
+            kb_state.output_mode = OUTPUT_BLE;
+            LOG_DEBUG("BLE: Output - %d | Connected - %d",kb_state.output_mode, RNBD.connected);
+            LOG_INFO("Bluetooth Initialisation Passed");
+
             return;
         }
     }
@@ -239,58 +286,111 @@ void sendBLEReport(void)
     static hid_report_t last_report = {0};
     uint32_t current_time = getMicroseconds();
 
+    // Only send if report has changed
     if (memcmp(&kb_state.current_report, &last_report, sizeof(hid_report_t)) != 0) {
-        uint8_t uart_buffer[sizeof(ble_hid_report_t) + 2];
 
-        uart_buffer[0] = 0xFD;
         ble_report.report_id = 1;
         memcpy(&ble_report.report, &kb_state.current_report, sizeof(hid_report_t));
-        memcpy(&uart_buffer[1], &ble_report, sizeof(ble_hid_report_t));
-        uart_buffer[sizeof(ble_hid_report_t) + 1] = 0xFE;
 
-        if (HAL_UART_Transmit_DMA(&hlpuart1, uart_buffer,
-                                 sizeof(ble_hid_report_t) + 2) == HAL_OK) {
+        if (GATT_sendHIDReport((uint8_t*)&ble_report, sizeof(ble_hid_report_t))) {
+            // Update timing and save last report
             kb_state.last_report.ble_last_report = current_time;
             memcpy(&last_report, &kb_state.current_report, sizeof(hid_report_t));
             clearReport();
+            LOG_DEBUG("BLE Report Successful");
+        } else {
+            LOG_DEBUG("BLE Report Failed");
         }
     }
+    LOG_DEBUG("BLE Report Exit");
 }
 
 
 void checkConnection()
 {
-    if(!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {
-        if (hUsbDeviceFS.dev_state == USBD_STATE_DEFAULT) {
-            kb_state.connection_mode = 0;
-            LOG_DEBUG("USB Device State: 0x%02X", hUsbDeviceFS.dev_state);
+    if (!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {
+        // No USB connection detected
+        if (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED) {
+            // USB connection is active
+            if (kb_state.output_mode != OUTPUT_USB) {
+                LOG_DEBUG("Switching to USB Mode");
+            }
+            kb_state.connection_mode = CONNECTION_USB;
             kb_state.output_mode = OUTPUT_USB;
-            LOG_DEBUG("Connection Mode: USB");
-            return;
+            LOG_DEBUG("USB Device State: 0x%02X", hUsbDeviceFS.dev_state);
         } else {
-            kb_state.connection_mode = 1;
+            // USB is not configured; default to BLE
+            if (kb_state.output_mode != OUTPUT_BLE) {
+                LOG_DEBUG("Switching to BLE Mode");
+            }
+            kb_state.connection_mode = CONNECTION_BLE;
             kb_state.output_mode = OUTPUT_BLE;
-            LOG_DEBUG("USB: 0x%02X", hUsbDeviceFS.dev_state);
-            LOG_DEBUG("Connection Mode 1: BLE");
-            return;
+            LOG_DEBUG("USB State: 0x%02X", hUsbDeviceFS.dev_state);
         }
     } else {
-        kb_state.connection_mode = 1;
+        // VBUS is active, default to BLE mode
+        if (kb_state.output_mode != OUTPUT_BLE) {
+            LOG_DEBUG("Switching to BLE Mode");
+        }
+        kb_state.connection_mode = CONNECTION_BLE;
         kb_state.output_mode = OUTPUT_BLE;
-        LOG_DEBUG("Connection Mode 2: BLE");
-        return;
     }
+    LOG_DEBUG("Connection Mode: %s", kb_state.connection_mode == CONNECTION_USB ? "USB" : "BLE");
 }
+
+
+void checkBLEconnection(void)
+{
+    if (!ble_conn_flag) return;// Early exit if the flag is not set
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    ble_conn_flag = false;       // Clear the flag
+    __set_PRIMASK(primask);
+
+    // Check the connection state using RNBD_isConnected
+    bool connectionStatus = RNBD.callback.getConnStatus();
+    static bool prev_status = false;
+    bool status_changed = false;
+
+    if (!RNBD.connected && connectionStatus) {
+        // Device was disconnected but is now connected
+        RNBD.gatt.setProtocolMode();
+        // Set protocol mode
+        RNBD.connected = SET;  // Update connection status
+        RNBD.device.connection_timer = BLE_ALTERED_TIMER; // Set longer timer
+
+        LOG_DEBUG("BLE Connected: Protocol Mode Set");
+        status_changed = true;
+    }
+    else if (RNBD.connected && !connectionStatus) {
+        // Device was connected but is now disconnected
+        RNBD.connected = RESET;              // Update connection status
+        RNBD.device.connection_timer = BLE_DEFAULT_TIMER; // Set shorter timer
+        LOG_DEBUG("BLE Disconnected");
+        status_changed = true;
+    }
+
+    if (prev_status != status_changed) {
+            LOG_DEBUG("BLE connection check completed. Status: %s",
+                     RNBD.connected ? "Connected" : "Disconnected");
+        }
+    prev_status = status_changed;
+}
+
 
 
 void reportArbiter(void)
 {
+	//LOG_DEBUG("Report Routing: %d", kb_state.output_mode);
     if (kb_state.output_mode == OUTPUT_USB &&
             elapsedTime(kb_state.last_report.usb_last_report) >= HID_FS_BINTERVAL * 1000) {
+    	//LOG_DEBUG("USB Report");
         sendUSBReport();
     }
     else if (kb_state.output_mode == OUTPUT_BLE &&
-             elapsedTime(kb_state.last_report.ble_last_report) >= HID_FS_BINTERVAL * 1000) {
+		 	elapsedTime(kb_state.last_report.ble_last_report) >= HID_FS_BINTERVAL * 1000) {
+    	//LOG_DEBUG("BLE Report");
         sendBLEReport();
     }
 }

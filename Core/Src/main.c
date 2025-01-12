@@ -26,9 +26,9 @@ volatile uint8_t report_ready_flag = 0;
 volatile ITStatus uart2_tc_flag = SET;
 
 // Hardware interface handlers
-TIM_HandleTypeDef htim2;
-TIM_HandleTypeDef htim3;
-TIM_HandleTypeDef htim21;
+TIM_HandleTypeDef htim2; //Haptic
+TIM_HandleTypeDef htim3; //Scan Interrupt
+TIM_HandleTypeDef htim21; //Non blocking timer
 UART_HandleTypeDef hlpuart1;
 UART_HandleTypeDef huart2;
 I2C_HandleTypeDef hi2c1;
@@ -55,6 +55,7 @@ int main(void)
     HAL_Init();
     SystemClock_Config();
     LOG_INFO("System Reset");
+
     /* Initialize all configured peripherals */
     MX_GPIO_Init();
     MX_DMA_Init();
@@ -65,39 +66,52 @@ int main(void)
     MX_I2C2_Init();
     LOG_INFO("I2C Peripheral Initialised");
 
-    /* Initialize USB and Bluetooth */
-    MX_USB_DEVICE_Init();
-    kb_state.connection_mode = 1;
-
-    if(kb_state.connection_mode) {
-        initBluetooth();
-    }
-
     /* Initialize Keyboard Hardware */
     initKeyboard();
     resetRows();
     LOG_INFO("Keyboard Hardware Initialised");
+
+    /* Initialize USB and Bluetooth */
+    MX_USB_DEVICE_Init();
+
+    kb_state.connection_mode = CONNECTION_BLE; //XXX Feature Under Test
+    if(kb_state.connection_mode) {
+        initBluetooth();
+    }
 
     /* Initialize Timers */
     MX_TIM2_Init();
     Init_TIM21();
     Init_TIM3();
     LOG_INFO("TIMER 2, 3 & 21 Initialised");
+    HAL_Delay(100);
 
     HAL_TIM_Base_Start(&htim21);
-    HAL_TIM_Base_Start_IT(&htim3);
+    LOG_DEBUG("Timer 21 Started");
+    HAL_Delay(100);
 
+    HAL_TIM_Base_Start_IT(&htim3);
+    LOG_DEBUG("Timer 3 Interrupt Started");
     LOG_INFO("System ready and running");
+    HAL_Delay(100);
 
     /* Main loop */
     while (1) {
-        if(scan_flag == 1) {
+        if(scan_flag) {
             scanKeyMatrix();
-            if(report_ready_flag) {
+            if(report_ready_flag == SET) {
                 reportArbiter();
                 report_ready_flag = 0;
             }
+
+            uint32_t primask = __get_PRIMASK();
+			__disable_irq();
             scan_flag = 0;
+            __set_PRIMASK(primask);
+        }
+
+        if(ble_conn_flag == SET){
+        	checkBLEconnection();
         }
     }
 }
@@ -196,7 +210,7 @@ static void Init_TIM3(void)
     HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig);
 
     // Set high priority interrupt
-    HAL_NVIC_SetPriority(TIM3_IRQn, 1, 0);
+    HAL_NVIC_SetPriority(TIM3_IRQn, 0, 2);
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
 }
 
@@ -346,10 +360,10 @@ static void MX_DMA_Init(void)
     __HAL_RCC_DMA1_CLK_ENABLE();
 
     /* DMA interrupt init */
-    HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 2);
+    HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 0, 1);
     HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
 
-    HAL_NVIC_SetPriority(DMA1_Channel4_5_6_7_IRQn, 1, 0);
+    HAL_NVIC_SetPriority(DMA1_Channel4_5_6_7_IRQn, 1, 1);
     HAL_NVIC_EnableIRQ(DMA1_Channel4_5_6_7_IRQn);
 }
 
@@ -541,15 +555,9 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
         __enable_irq();
 
     } else if (huart == &hlpuart1) {
-
-		// Clear any pending transmission flags if necessary
 		if (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC)) {
 			__HAL_UART_CLEAR_FLAG(huart, UART_FLAG_TC);
-
-			//ATOMIC_SET_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
 			tx_irq_handler();
-			//ATOMIC_SET_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
-			//LOG_DEBUG("DMA TX Complete for hlpuart1");
 		}
     }
 }
@@ -560,7 +568,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	if (huart == &hlpuart1)
 	{
 		rx_irq_handler();
-		//LOG_DEBUG("DMA RX Complete for hlpuart1");
     }
 }
 /**
@@ -569,13 +576,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   */
 void Error_Handler(void)
 {
-    LOG_DEBUG("Hard-fault Occurred!\n");
-    HAL_Delay(1000);
+    LOG_ERROR("Hard-fault Occurred!\n");
     __disable_irq();
     while (1) {
         HAL_NVIC_EnableIRQ(USART2_IRQn);
-        LOG_DEBUG("RESET/POWER Cycling Required\n");
-        HAL_Delay(60000);
+        LOG_WARNING("Reseting system in 3 seconds");
+        HAL_Delay(3000);
     }
 }
 

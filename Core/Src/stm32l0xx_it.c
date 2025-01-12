@@ -70,6 +70,9 @@ extern UART_HandleTypeDef hlpuart1;
 extern TIM_HandleTypeDef htim3;
 
 extern volatile uint8_t scan_flag;
+extern volatile uint8_t ble_conn_flag;
+extern keyboard_state_t kb_state;
+extern rnbd_interface_t RNBD;
 
 /******************************************************************************/
 /*           Cortex-M0+ Processor Interruption and Exception Handlers          */
@@ -175,7 +178,6 @@ void RNG_LPUART1_IRQHandler(void)
 {
 	if(__HAL_UART_GET_FLAG(&hlpuart1, UART_FLAG_IDLE)) {
 	        __HAL_UART_CLEAR_IDLEFLAG(&hlpuart1);
-	        //LOG_DEBUG("Idle Line");
 	        rx_irq_handler();
 	    }
 
@@ -183,16 +185,32 @@ void RNG_LPUART1_IRQHandler(void)
 }
 
 void TIM3_IRQHandler(void) {
+	// 500us Timer Interrupt
+	static uint32_t ble_start_time = 0;
+
+	uint32_t primask = __get_PRIMASK();
+	__disable_irq();
+
     if (__HAL_TIM_GET_FLAG(&htim3, TIM_FLAG_UPDATE) != RESET &&
         __HAL_TIM_GET_IT_SOURCE(&htim3, TIM_IT_UPDATE) != RESET) {
         __HAL_TIM_CLEAR_IT(&htim3, TIM_IT_UPDATE);
 
-		//GPIOB->ODR ^= GPIO_PIN_12;
-		if(!scan_flag){
-			scan_flag = true;
+		// Set scan flag
+		if (!scan_flag) {
+			scan_flag = SET;
 		}
     }
+
+    // Check BLE connection every timer interval
+    if ((kb_state.output_mode == OUTPUT_BLE) &&
+		((uint32_t)(HAL_GetTick() - ble_start_time)) >= RNBD.device.connection_timer) {
+    	ble_start_time = HAL_GetTick();
+    	ble_conn_flag = SET; // Signal main loop to check BLE connection
+    }
+
+    __set_PRIMASK(primask);
 }
+
 
 /**
   * @brief This function handles USB event interrupt / USB wake-up interrupt through EXTI line 18.

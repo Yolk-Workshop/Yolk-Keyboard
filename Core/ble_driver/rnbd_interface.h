@@ -1,12 +1,16 @@
 /*
  * rnbd_interface.h
+ * Modified by Kuzipa Mumba in 2025
+ * The original code has been modified and adapted for use on the :
+ * STM32L02 Micro-controller
+ * Yolk Keyboard
  *
  *  Created on: Jan 7, 2025
  *      Author: bettysidepiece
  */
 
-#ifndef RNBD_RNBD_INTERFACE_H_
-#define RNBD_RNBD_INTERFACE_H_
+#ifndef BLE_DRIVER_RNBD_INTERFACE_H_
+#define BLE_DRIVER_RNBD_INTERFACE_H_
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,6 +19,7 @@
 #define COMMAND_BUFFER_SIZE 32
 #define RX_BUFFER_SIZE     128
 #define TX_BUFFER_SIZE     128
+#define GATT_HANDLE_SIZE 4
 
 /**
  * @ingroup rnbd_interface
@@ -35,7 +40,6 @@ typedef enum {
 	RNBD_BAD_RESPONSE
 }RNBD_status_t;
 
-
 /**
  * @ingroup rnbd_interface
  * @struct iRNBD_FunctionPtrs_t
@@ -44,9 +48,11 @@ typedef enum {
 typedef struct
 {
     // RNBD UART interface control
+	//Wrapper for UART RX
     void (*write)(uint8_t);
+    //Wrapper for UART TX
     uint8_t (*read)(void);
-
+    //TX buffer red to transmit data
     bool (*transmitReady)(void);
     // RNBD Mode pin set
     void (*systemModeset)(RNBD_sys_modes_t);
@@ -54,11 +60,13 @@ typedef struct
     void (*rxIndicate)(bool);
     // RNBD Reset pin control
     void (*resetModule)(bool);
-
     // Delay API
     void (*delayMs)(uint32_t);
     // Status Message Handler
     void (*asyncHandler)(char*);
+    //Get BLE connection status
+    bool (*getConnStatus)(void);
+    //RX buffer ready to be read
     bool (*dataReady)(void);
 }RNBD_FuncPtrs_t;
 
@@ -78,21 +86,39 @@ typedef struct
 typedef struct
 {
 	/* Device Identification */
-	char device_name[32];         // Current device name
-	char firmware_version[16];     // Firmware version string (e.g., "v1.2.3")
+	const uint8_t *vendorName;
+	const uint8_t *productName;
+	const uint8_t *hwVersion;
+	const uint8_t *fwVersion;
+	const uint8_t *driverVersion;
+	uint16_t bleSdaHid;
 	char mac_address[18];
 
 	/* Configuration Parameters */
 	uint8_t tx_power;             // Transmit power level (0-15)
-	uint32_t baud_rate;           // UART baud rate
 	uint8_t service_bitmap;       // Enabled services bitmap
-	bool flow_control;            // Hardware flow control enabled/disabled
-	int8_t rssi;                 // Signal strength
+	int8_t rssi;                // Signal strength
 
-	/* Error Tracking */
-	uint32_t error_count;        // Number of communication errors
-	uint8_t last_error;         // Last error code
+	uint32_t connection_timer;
+
 }RNBD_dev_t;
+
+
+typedef struct {
+    uint8_t inputReportHandle[GATT_HANDLE_SIZE];       // 100B - NOTIFY
+    uint8_t outputReportHandle[GATT_HANDLE_SIZE];      // 100D - READ|WRITE|WRITE_NO_RESPONSE
+    uint8_t referenceReportHandle[GATT_HANDLE_SIZE];   // 100A - READ
+    uint8_t bootInputHandle[GATT_HANDLE_SIZE];         // 1010 - NOTIFY
+    uint8_t bootOutputHandle[GATT_HANDLE_SIZE];        // 1012 - READ|WRITE|WRITE_NO_RESPONSE
+    uint8_t bootReferenceHandle[GATT_HANDLE_SIZE];     // 100F - READ
+    uint8_t protocolModeHandle[GATT_HANDLE_SIZE];      // 1002
+    uint8_t hidInfoHandle[GATT_HANDLE_SIZE];           // 1006
+    uint8_t reportMapHandle[GATT_HANDLE_SIZE];         // 1004
+    uint8_t hidCtrlPointHandle[GATT_HANDLE_SIZE];      // 1008
+    uint8_t ledStateBitmap;
+    uint8_t lastHandle;
+    bool (*setProtocolMode)(void);
+} RNBD_gatt_state_t;
 
 
 typedef struct {
@@ -129,6 +155,7 @@ typedef struct {
     RNBD_dev_t device;         // Device parameters
     RNBD_uart_t uart;          // UART communication buffers
     RNBD_async_t async;        // Asynchronous communication handling
+    RNBD_gatt_state_t gatt;
 } rnbd_interface_t;
 
 /**

@@ -1,4 +1,9 @@
 /**
+ * Modified by Kuzipa Mumba in 2025
+ * The original code has been modified and adapted for use on the :
+ * STM32L02 Micro-controller
+ * Yolk Keyboard
+ *
  * RNBD Generated Driver Source File
  *
  * @file rnbd.c
@@ -8,6 +13,8 @@
  * @brief This is the generated driver source file for RNBD driver using RNBD.
  *
  * @version RNBD Driver Version  2.0.0
+ *
+ *
  */
 /*
  © [2024] Microchip Technology Inc. and its subsidiaries.
@@ -31,21 +38,33 @@
  */
 
 #include "rnbd.h"
+
 #include "logger.h"
 
-rnbd_interface_t RNBD;
 
-/**
- * @def STATUS_MESSAGE_DELIMITER
- * This Variable provide a definition of the RNBD devices PRE/POST status message delimiter.
- */
+//Intialise Global RNBD Instance
+rnbd_interface_t RNBD = {0};
 
-const uint8_t RNBD_driver_version[] = "2.0.0"; /**<  Current RNBD Driver Version */
-const uint8_t VENDOR_NAME[] = "Yolk Workshop";
-const uint8_t PRODUCT_NAME[] = "Yolk Keyboard";
-const uint8_t HW_VERSION[] = "0.1.0";
-const uint8_t SW_VERSION[] = "0.0.5";
-const uint16_t BLE_SDA_HID = 960;
+typedef enum {
+    CONN_CHECK_IDLE,
+    CONN_CHECK_SEND,
+    CONN_CHECK_WAIT,
+    CONN_CHECK_READ
+} ConnectionCheckState;
+
+typedef struct {
+    ConnectionCheckState state;
+    uint32_t startTime;
+    uint8_t responseBuffer[128];  // Reduced from 128 as we need very little
+    uint8_t responseRead;
+    bool isConnected;
+} ConnectionCheck_t;
+
+static ConnectionCheck_t connCheck = {
+    .state = CONN_CHECK_IDLE,
+    .isConnected = false
+};
+
 
 /**
  * @ingroup rnbd
@@ -55,6 +74,20 @@ const uint16_t BLE_SDA_HID = 960;
  * @retval false -data is not ready
  */
 static bool RNBD_DataFilter(void);
+
+void RNBD_Reset(void)
+{
+	//Enter reset
+	RNBD.callback.resetModule(true);
+	//Wait for Reset
+	RNBD.callback.delayMs(RNBD_RESET_DELAY_TIME);
+	//Exit reset
+	RNBD.callback.resetModule(false);
+
+	//Wait while RNBD is booting up
+	RNBD.callback.delayMs(RNBD_STARTUP_DELAY);
+}
+
 
 bool RNBD_Init(void)
 {
@@ -70,17 +103,15 @@ bool RNBD_Init(void)
 
 	//Remove unread data sent by RNBD, if any
 	while (RNBD.callback.dataReady()) {
-		RNBD.callback.read(); //TODO: Program Halts here something to do with UART RX
+		RNBD.callback.read();
 	}
 	LOG_DEBUG("RNBD350 Reboot Finished");
 	return true;
 }
 
+
 void RNBD_SendCmd(const uint8_t *cmd, uint8_t cmdLen)
 {
-
-	LOG_DEBUG("CMD:%s | CMD Size: %d", cmd, cmdLen);
-	RNBD.callback.delayMs(1);
 
 	for(uint8_t index=0; index < cmdLen; index++){
 		//LOG_DEBUG("Data[%d]: %c",index, cmd[index]);
@@ -112,6 +143,7 @@ uint8_t RNBD_GetCmd(const uint8_t *getCmd, uint8_t getCmdLen)
 	return index;
 }
 
+
 bool RNBD_ReadMsg(const uint8_t *expectedMsg, uint8_t msgLen)
 {
 	unsigned int ResponseRead = 0, ResponseTime = 0, ResponseCheck = 0;
@@ -142,6 +174,7 @@ bool RNBD_ReadMsg(const uint8_t *expectedMsg, uint8_t msgLen)
 
 	return true;
 }
+
 
 bool RNBD_ReadDefaultResponse(void)
 {
@@ -187,27 +220,24 @@ bool RNBD_SendCommand_ReceiveResponse(const uint8_t *cmdMsg, uint8_t cmdLen,
 	int ResponseRead = 0, ResponseTime = 0, ResponseCheck = 0;
 	//Flush out any read data
 	while (RNBD.callback.dataReady()) {
-		RNBD.callback.read(); //TODO RX bug might occur here as well
+		RNBD.callback.read();
 	}
 
-	//LOG_DEBUG("Enter Send Command");
 	//Sending Command to UART
 	RNBD_SendCmd(cmdMsg, cmdLen);
 
-	//LOG_DEBUG("Exit Send Command");
-
 	//Waiting for the response time
-	while (!RNBD.callback.dataReady() || ResponseTime <= RESPONSE_TIMEOUT) {
-		RNBD.callback.delayMs(1);
+	uint32_t startTime = HAL_GetTick();
+	while (!RNBD.callback.dataReady() || (HAL_GetTick() - startTime)  <= RESPONSE_TIMEOUT) {
 		ResponseTime++;
 	}
 
 	//Read Ready data
 	while (RNBD.callback.dataReady()) {
 		RNBD.uart.resp[ResponseRead] = RNBD.callback.read();
-		LOG_DEBUG("Read Response = %c", RNBD.uart.resp[ResponseRead]);
 		ResponseRead++;
 	}
+	LOG_DEBUG("Resp = %s", RNBD.uart.resp);
 
 	//Comparing length of response expected
 	if (ResponseRead != responseLen) {
@@ -221,7 +251,7 @@ bool RNBD_SendCommand_ReceiveResponse(const uint8_t *cmdMsg, uint8_t cmdLen,
 		}
 	}
 
-	//LOG_DEBUG("RNBD OK");
+	memset(RNBD.uart.command_buffer, 0, sizeof(RNBD.uart.command_buffer));
 	return true;
 }
 
@@ -238,6 +268,7 @@ bool RNBD_EnterCmdMode(void)
 			cmdModeResponse, 5U);
 }
 
+
 bool RNBD_EnterDataMode(void)
 {
 	const uint8_t dataModeResponse[] = { 'E', 'N', 'D', '\r', '\n' };
@@ -250,6 +281,27 @@ bool RNBD_EnterDataMode(void)
 
 	return RNBD_SendCommand_ReceiveResponse(RNBD.uart.command_buffer, 5,
 			dataModeResponse, 5U);
+}
+
+
+bool RNBD_SendData(uint8_t* data, uint16_t len)
+{
+	uint32_t start = HAL_GetTick();
+
+	__disable_irq();
+	for(uint8_t index=0; index < len; index++){
+		RNBD.callback.write(data[index]);
+		while(!RNBD.callback.transmitReady()){;
+			if((HAL_GetTick()- start) > 1){
+				__enable_irq();
+				LOG_DEBUG("Send Data Timeout");
+				return false;
+			}
+		}
+	}
+	__enable_irq();
+	LOG_DEBUG("Data Sent");
+	return true;
 }
 
 
@@ -284,27 +336,94 @@ uint16_t RNBD_GetGRCommand(void)
 }
 
 
+bool RNBD_isConnected(void) {
+    static const uint8_t CMD_GK[] = "GK\r\n";
+    static bool prev_status = false;  // Previous connection status
+    bool current_status = false;      // Current connection status
+
+    // Clear buffers before sending the command
+    while (RNBD.callback.dataReady()) RNBD.callback.read();
+    memset(connCheck.responseBuffer, 0, sizeof(connCheck.responseBuffer));
+    connCheck.responseRead = 0;
+
+    // Send "GK" command
+    RNBD_SendCmd((uint8_t *)CMD_GK, sizeof(CMD_GK) - 1);
+
+    // Wait for a response or timeout
+    uint32_t startTime = HAL_GetTick();
+    while ((HAL_GetTick() - startTime) < RESPONSE_TIMEOUT) {
+        if (RNBD.callback.dataReady()) {
+            // Read the response into the buffer
+            while (RNBD.callback.dataReady() &&
+                   connCheck.responseRead < sizeof(connCheck.responseBuffer)) {
+                connCheck.responseBuffer[connCheck.responseRead++] = RNBD.callback.read();
+            }
+            break;  // Exit the loop once data is available
+        }
+    }
+
+    // Process the response
+    if (connCheck.responseRead == 0) {
+        current_status = false;  // No response received
+    } else if (connCheck.responseBuffer[0] == 'n'
+    		|| connCheck.responseBuffer[3] == 'e') {
+        current_status = false;  // "none" response
+    } else if (connCheck.responseBuffer[0] == 'E'
+    		|| connCheck.responseBuffer[2] == 'r') {
+        current_status = false;  // "Err" response
+    } else {
+        current_status = true;   // Valid response indicates connection
+    }
+
+    // Log status change if different from the previous status
+    if (current_status != prev_status) {
+        LOG_DEBUG("Connection status changed: %s, Response: %s",
+                  current_status ? "Connected" : "Disconnected",
+                  connCheck.responseBuffer);
+        prev_status = current_status;  // Update the previous status
+    }
+
+    return current_status;
+}
+
+
+
 bool RNBD_SetName(const uint8_t *name, uint8_t nameLen)
 {
-	uint8_t index;
-	const uint8_t cmdPrompt[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',
-			' ' };
+    uint8_t index;
+    const uint8_t cmdPrompt[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>', ' ' };
 
-	RNBD.uart.command_buffer[0] = 'S';
-	RNBD.uart.command_buffer[1] = 'N';
-	RNBD.uart.command_buffer[2] = ',';
+    // Ensure name and nameLen are valid
+    if (name == NULL || nameLen == 0 || nameLen > RNBD_BUFFER_SIZE - 5) {
+        return false; // Invalid input or name too long for the buffer
+    }
 
-	for (index = 0; index < nameLen; index++) {
-		RNBD.uart.command_buffer[3 + index] = name[index];
-	}
-	index = index + 3;
+    // Validate name characters (optional, ensures only printable ASCII)
+    for (index = 0; index < nameLen; index++) {
+        if (name[index] < 32 || name[index] > 126) { // Non-printable ASCII range
+            return false;
+        }
+    }
 
-	RNBD.uart.command_buffer[index++] = '\r';
-	RNBD.uart.command_buffer[index++] = '\n';
+    // Construct the "SN,<name>\r\n" command
+    RNBD.uart.command_buffer[0] = 'S';
+    RNBD.uart.command_buffer[1] = 'N';
+    RNBD.uart.command_buffer[2] = ',';
 
-	return RNBD_SendCommand_ReceiveResponse(RNBD.uart.command_buffer,
-			nameLen + 5U, cmdPrompt, 10);
+    for (index = 0; index < nameLen; index++) {
+        RNBD.uart.command_buffer[3 + index] = name[index];
+    }
+    index = index + 3;
+
+    RNBD.uart.command_buffer[index++] = '\r';
+    RNBD.uart.command_buffer[index++] = '\n';
+    //LOG_DEBUG("DATA SENT: %s", RNBD.uart.command_buffer);
+    //LOG_DEBUG("DATA LENGTH; %d | %d",index, (nameLen+5));
+    // Send the command and check the response
+    return RNBD_SendCommand_ReceiveResponse(RNBD.uart.command_buffer,
+                                            index, cmdPrompt, sizeof(cmdPrompt));
 }
+
 
 
 bool RNBD_SetFastAdvertisementParameters(uint16_t fastAdvInterval, uint16_t fastAdvTimeout, uint16_t slowAdvInterval)
@@ -588,6 +707,7 @@ bool RNBD_SetBaudRate(uint8_t baudRate)
 			cmdPrompt, 10);
 }
 
+
 bool RNBD_ConnectToLastBondedDevice(void)
 {
     const uint8_t connectCmd[] = { 'C', '\r', '\n' };
@@ -597,7 +717,19 @@ bool RNBD_ConnectToLastBondedDevice(void)
     return RNBD_SendCommand_ReceiveResponse(connectCmd, sizeof(connectCmd), expectedResponse, sizeof(expectedResponse));
 }
 
-bool RNBD_SetServiceBitmap(uint8_t serviceBitmap) {
+
+bool RNBD_ServiceChangeIndicator(void)
+{
+    const uint8_t connectCmd[] = { 'S', 'I' , '\r', '\n' };
+    const uint8_t expectedResponse[] ={ 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',' ' };
+
+    // Send the command and wait for the expected response
+    return RNBD_SendCommand_ReceiveResponse(connectCmd, sizeof(connectCmd), expectedResponse, sizeof(expectedResponse));
+}
+
+
+bool RNBD_SetServiceBitmap(uint8_t serviceBitmap)
+{
 	const uint8_t cmdPrompt[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',
 			' ' };
 	uint8_t temp = (serviceBitmap >> 4);
@@ -615,7 +747,9 @@ bool RNBD_SetServiceBitmap(uint8_t serviceBitmap) {
 			cmdPrompt, 10);
 }
 
-bool RNBD_SetFeaturesBitmap(uint16_t featuresBitmap) {
+
+bool RNBD_SetFeaturesBitmap(uint16_t featuresBitmap)
+{
 	const uint8_t cmdPrompt[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',
 			' ' };
 	uint8_t temp = (uint8_t) (featuresBitmap >> 12);
@@ -641,7 +775,9 @@ bool RNBD_SetFeaturesBitmap(uint16_t featuresBitmap) {
 			cmdPrompt, 10);
 }
 
-bool RNBD_SetIOCapability(uint8_t ioCapability) {
+
+bool RNBD_SetIOCapability(uint8_t ioCapability)
+{
 	const uint8_t cmdPrompt[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',
 			' ' };
 	RNBD.uart.command_buffer[0] = 'S';
@@ -655,7 +791,9 @@ bool RNBD_SetIOCapability(uint8_t ioCapability) {
 			cmdPrompt, 10);
 }
 
-bool RNBD_SetPinCode(const uint8_t *pinCode, uint8_t pinCodeLen) {
+
+bool RNBD_SetPinCode(const uint8_t *pinCode, uint8_t pinCodeLen)
+{
 	uint8_t index;
 	const uint8_t cmdPrompt[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',
 			' ' };
@@ -675,7 +813,9 @@ bool RNBD_SetPinCode(const uint8_t *pinCode, uint8_t pinCodeLen) {
 			cmdPrompt, 10);
 }
 
-bool RNBD_SetStatusMsgDelimiter(char preDelimiter, char postDelimiter) {
+
+bool RNBD_SetStatusMsgDelimiter(char preDelimiter, char postDelimiter)
+{
 	const uint8_t cmdPrompt[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',
 			' ' };
 
@@ -692,7 +832,8 @@ bool RNBD_SetStatusMsgDelimiter(char preDelimiter, char postDelimiter) {
 			cmdPrompt, 10);
 }
 
-bool RNBD_SetOutputs(rnbd_gpio_bitmap_t bitMap) {
+bool RNBD_SetOutputs(rnbd_gpio_bitmap_t bitMap)
+{
 	const uint8_t cmdPrompt[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',
 			' ' };
 
@@ -732,7 +873,8 @@ bool RNBD_SetOutputs(rnbd_gpio_bitmap_t bitMap) {
 			cmdPrompt, 10U);
 }
 
-rnbd_gpio_stateBitMap_t RNBD_GetInputsValues(rnbd_gpio_ioBitMap_t getGPIOs) {
+rnbd_gpio_stateBitMap_t RNBD_GetInputsValues(rnbd_gpio_ioBitMap_t getGPIOs)
+{
 	char ioHighNibble = '0';
 	char ioLowNibble = '0';
 	uint8_t ioValue[] = { '0', '0' };
@@ -763,7 +905,9 @@ rnbd_gpio_stateBitMap_t RNBD_GetInputsValues(rnbd_gpio_ioBitMap_t getGPIOs) {
 	return ioBitMapValue;
 }
 
-uint8_t* RNBD_GetRSSIValue(void) {
+
+uint8_t* RNBD_GetRSSIValue(void)
+{
 	static uint8_t rssiResp[20];
 	unsigned int ResponseRead = 0, ResponseTime = 0;
 
@@ -792,6 +936,7 @@ uint8_t* RNBD_GetRSSIValue(void) {
 	return rssiResp;
 }
 
+
 bool RNBD_RebootCmd(void) {
 	bool RebootStatus = false;
 	const uint8_t rebootResponse[] = { 'R', 'e', 'b', 'o', 'o', 't', 'i', 'n',
@@ -810,17 +955,20 @@ bool RNBD_RebootCmd(void) {
 	return RebootStatus;
 }
 
-bool RNBD_FactoryReset(RNBD_FACTORY_RESET_MODE_t resetMode) {
+
+bool RNBD_FactoryReset(RNBD_FACTORY_RESET_MODE_t resetMode)
+{
 	bool FactoryResetStatus = false;
 	const uint8_t reboot[] = { 'R', 'e', 'b', 'o', 'o', 't', ' ', 'a', 'f', 't',
 			'e', 'r', ' ', 'F', 'a', 'c', 't', 'o', 'r', 'y', ' ', 'R', 'e',
 			's', 'e', 't', '\r', '\n' };
+
 	RNBD.uart.command_buffer[0] = 'S';
 	RNBD.uart.command_buffer[1] = 'F';
 	RNBD.uart.command_buffer[2] = ',';
-	RNBD.uart.command_buffer[4] = (char) resetMode;
-	RNBD.uart.command_buffer[5] = '\r';
-	RNBD.uart.command_buffer[6] = '\n';
+	RNBD.uart.command_buffer[3] = resetMode + '0';
+	RNBD.uart.command_buffer[4] = '\r';
+	RNBD.uart.command_buffer[5] = '\n';
 
 	FactoryResetStatus = RNBD_SendCommand_ReceiveResponse(
 			RNBD.uart.command_buffer, 6U, reboot, 28U);
@@ -830,7 +978,9 @@ bool RNBD_FactoryReset(RNBD_FACTORY_RESET_MODE_t resetMode) {
 	return FactoryResetStatus;
 }
 
-bool RNBD_Disconnect(void) {
+
+bool RNBD_Disconnect(void)
+{
 	RNBD.uart.command_buffer[0] = 'K';
 	RNBD.uart.command_buffer[1] = ',';
 	RNBD.uart.command_buffer[2] = '1';
@@ -846,17 +996,21 @@ void RNBD_set_StatusDelimter(char Delimter_Character) {
 	RNBD.async.Demiliter = Delimter_Character;
 }
 
+
 char RNBD_get_StatusDelimter() {
 	return RNBD.async.Demiliter;
 }
+
 
 void RNBD_set_NoDelimter(bool value) {
 	RNBD.async.skip_delimter = value;
 }
 
+
 bool RNBD_get_NoDelimter() {
 	return RNBD.async.skip_delimter;
 }
+
 
 bool RNBD_AsyncMessageHandlerSet(char *pBuffer, uint8_t len) {
 	if ((pBuffer != NULL) && (len > 1)) {
