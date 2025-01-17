@@ -24,6 +24,7 @@ static void Init_TIM21(void);
 volatile uint8_t scan_flag = 0;
 volatile uint8_t report_ready_flag = 0;
 volatile ITStatus uart2_tc_flag = SET;
+volatile ITStatus sys_ready = RESET;
 
 // Hardware interface handlers
 TIM_HandleTypeDef htim2; //Haptic
@@ -36,6 +37,7 @@ I2C_HandleTypeDef hi2c2;
 DMA_HandleTypeDef hdma_usart2_tx;
 DMA_HandleTypeDef hdma_lpuart1_rx;
 DMA_HandleTypeDef hdma_lpuart1_tx;
+
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
 extern uint8_t dma_rx_buffer[RX_BUFFER_SIZE];
@@ -93,7 +95,9 @@ int main(void)
     HAL_TIM_Base_Start_IT(&htim3);
     LOG_DEBUG("Timer 3 Interrupt Started");
     LOG_INFO("System ready and running");
-    HAL_Delay(100);
+
+    sys_ready = RESET;
+    //HAL_Delay(100);
 
     /* Main loop */
     while (1) {
@@ -112,6 +116,21 @@ int main(void)
 
         if(ble_conn_flag == SET){
         	checkBLEconnection();
+        }
+
+        if((RNBD.async.msg_in_progress == RESET) &&
+        		(strlen(RNBD.async.async_buffer)>0)){
+
+        	if(sys_ready) sys_ready = RESET;
+
+        	RNBD.callback.asyncHandler((char*)RNBD.async.async_buffer);
+
+        	if(RNBD.gatt.mode) {
+				RNBD.callback.delayMs(7);
+				RNBD.gatt.events.gatt_configure_hid();
+			};
+
+        	memset(RNBD.async.async_buffer, 0,sizeof(RNBD.async.async_buffer));
         }
     }
 }

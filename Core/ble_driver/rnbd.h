@@ -57,12 +57,13 @@
  * This macro defines the time needed to place RNBD device in reset.
  */
 /* This value depends upon the System Clock Frequency, Baudrate value and Error percentage of Baudrate*/
-#define RESPONSE_TIMEOUT 65
-#define RNBD_UART_TIMEOUT          1000
-#define RNBD_BUFFER_SIZE           256
-#define RNBD_MAX_CMD_SIZE          64
-#define RNBD_RESET_DELAY_TIME         (1)
-#define RNBD_STARTUP_DELAY            (300)
+#define RESPONSE_TIMEOUT 		65
+#define RNBD_UART_TIMEOUT       1000
+#define RNBD_BUFFER_SIZE        256
+#define RNBD_MAX_CMD_SIZE       64
+#define RNBD_RESET_DELAY_TIME   (1)
+#define RNBD_STARTUP_DELAY      (300)
+#define RNBD_DELIMITER 			'%'
 
 #define NIBBLE2ASCII(nibble) (((((nibble) & 0x0F) < 0x0A) ? ((nibble) & 0x0F) + '0' : ((nibble) & 0x0F) + 0x57))
 
@@ -72,16 +73,20 @@
 #define HW_VERSION_LEN 				5          // length of "0.1.0"
 #define SW_VERSION_LEN 				5          // length of "0.0.5"
 
+#define BLE_STD_INTERVAL 			6U
 
-// Define individual bits as enum
+
+// Define encryption properties as additional bits
 typedef enum {
-    PROPERTY_READ           = 0x02,
-    PROPERTY_WRITE_NO_ACK  	= 0x04,
-    PROPERTY_WRITE         	= 0x08,
-    PROPERTY_NOTIFY        	= 0x10,
-    PROPERTY_INDICATE      	= 0x20,
-    PROPERTY_AUTHENTICATED 	= 0x40,
-    PROPERTY_BROADCAST     	= 0x80
+    PROPERTY_READ = 0x02,
+    PROPERTY_WRITE_NO_ACK = 0x04,
+    PROPERTY_WRITE = 0x08,
+    PROPERTY_NOTIFY = 0x10,
+    PROPERTY_INDICATE = 0x20,
+    PROPERTY_AUTHENTICATED = 0x40,
+    PROPERTY_BROADCAST = 0x80,
+    PROPERTY_READ_ENCRYPT = (PROPERTY_READ | PROPERTY_AUTHENTICATED),      // 0x42
+    PROPERTY_WRITE_ENCRYPT = (PROPERTY_WRITE | PROPERTY_AUTHENTICATED)    // 0x48
 } gatt_property_bits_t;
 
 /**
@@ -246,6 +251,7 @@ void GATT_updateLEDState(uint8_t ledBitmap);
 
 
 //RNBD350 Command Functions
+bool RNBD_BondToConnectedDevice(void);
 bool RNBD_ServiceChangeIndicator(void);
 bool RNBD_SendData(uint8_t* data, uint16_t len);
 bool RNBD_SetAppearance(uint16_t appearanceCode);

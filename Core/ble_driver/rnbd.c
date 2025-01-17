@@ -38,7 +38,6 @@
  */
 
 #include "rnbd.h"
-
 #include "logger.h"
 
 
@@ -73,7 +72,6 @@ static ConnectionCheck_t connCheck = {
  * @retval true - data is ready
  * @retval false -data is not ready
  */
-static bool RNBD_DataFilter(void);
 
 void RNBD_Reset(void)
 {
@@ -83,7 +81,6 @@ void RNBD_Reset(void)
 	RNBD.callback.delayMs(RNBD_RESET_DELAY_TIME);
 	//Exit reset
 	RNBD.callback.resetModule(false);
-
 	//Wait while RNBD is booting up
 	RNBD.callback.delayMs(RNBD_STARTUP_DELAY);
 }
@@ -97,15 +94,18 @@ bool RNBD_Init(void)
 	RNBD.callback.delayMs(RNBD_RESET_DELAY_TIME);
 	//Exit reset
 	RNBD.callback.resetModule(false);
-
 	//Wait while RNBD is booting up
 	RNBD.callback.delayMs(RNBD_STARTUP_DELAY);
-
 	//Remove unread data sent by RNBD, if any
 	while (RNBD.callback.dataReady()) {
 		RNBD.callback.read();
 	}
 	LOG_DEBUG("RNBD350 Reboot Finished");
+
+	RNBD.async.Demiliter = RNBD_DELIMITER;
+	RNBD.callback.asyncHandler = asyncMessageHandler;
+	RNBD.async.asyncBufferSize = RNBD_BUFFER_SIZE;
+
 	return true;
 }
 
@@ -217,7 +217,8 @@ bool RNBD_ReadDefaultResponse(void)
 bool RNBD_SendCommand_ReceiveResponse(const uint8_t *cmdMsg, uint8_t cmdLen,
 		const uint8_t *responsemsg, uint8_t responseLen)
 {
-	int ResponseRead = 0, ResponseTime = 0, ResponseCheck = 0;
+	int ResponseRead = 0;
+	int ResponseCheck = 0;
 	//Flush out any read data
 	while (RNBD.callback.dataReady()) {
 		RNBD.callback.read();
@@ -225,19 +226,18 @@ bool RNBD_SendCommand_ReceiveResponse(const uint8_t *cmdMsg, uint8_t cmdLen,
 
 	//Sending Command to UART
 	RNBD_SendCmd(cmdMsg, cmdLen);
-
+	//LOG_DEBUG("Command Sent");
 	//Waiting for the response time
 	uint32_t startTime = HAL_GetTick();
 	while (!RNBD.callback.dataReady() || (HAL_GetTick() - startTime)  <= RESPONSE_TIMEOUT) {
-		ResponseTime++;
 	}
-
+	//LOG_DEBUG("Response Retrieved");
 	//Read Ready data
 	while (RNBD.callback.dataReady()) {
 		RNBD.uart.resp[ResponseRead] = RNBD.callback.read();
 		ResponseRead++;
 	}
-	LOG_DEBUG("Resp = %s", RNBD.uart.resp);
+	LOG_DEBUG("%s", RNBD.uart.resp);
 
 	//Comparing length of response expected
 	if (ResponseRead != responseLen) {
@@ -383,6 +383,7 @@ bool RNBD_isConnected(void) {
         prev_status = current_status;  // Update the previous status
     }
 
+    //LOG_DEBUG("BLE status : %s", current_status?"connected":"disconnected");
     return current_status;
 }
 
@@ -708,6 +709,16 @@ bool RNBD_SetBaudRate(uint8_t baudRate)
 }
 
 
+bool RNBD_BondToConnectedDevice(void)
+{
+	const uint8_t connectCmd[] = { 'B', '\r', '\n' };
+    const uint8_t expectedResponse[] ={ 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>',' ' };
+
+	// Send the command and wait for the expected response
+    //LOG_DEBUG("Bonding to connected Device : %s", connectCmd);
+	return RNBD_SendCommand_ReceiveResponse(connectCmd, sizeof(connectCmd), expectedResponse, sizeof(expectedResponse));
+}
+
 bool RNBD_ConnectToLastBondedDevice(void)
 {
     const uint8_t connectCmd[] = { 'C', '\r', '\n' };
@@ -950,8 +961,6 @@ bool RNBD_RebootCmd(void) {
 	RebootStatus = RNBD_SendCommand_ReceiveResponse(RNBD.uart.command_buffer,
 			5U, rebootResponse, 11U);
 
-	RNBD.callback.delayMs(350);
-
 	return RebootStatus;
 }
 
@@ -1011,64 +1020,3 @@ bool RNBD_get_NoDelimter() {
 	return RNBD.async.skip_delimter;
 }
 
-
-bool RNBD_AsyncMessageHandlerSet(char *pBuffer, uint8_t len) {
-	if ((pBuffer != NULL) && (len > 1)) {
-		RNBD.async.async_buffer = pBuffer;
-		RNBD.async.asyncBufferSize = len - 1;
-		return true;
-	} else {
-		return false;
-	}
-}
-
-
-bool RNBD_isDataReady(void) {
-	if (RNBD.uart.dataReady) {
-		return true;
-	}
-
-	if (RNBD.callback.dataReady()) {
-		return RNBD_DataFilter();
-	}
-	return false;
-}
-
-
-uint8_t RNBD_Read(void) {
-	while (RNBD_isDataReady() == false)
-		; // Wait
-	RNBD.uart.dataReady = false;
-	return RNBD.async.peek;
-}
-
-
-static bool RNBD_DataFilter(void) {
-	static bool asyncBuffering = false;
-
-	uint8_t readChar = RNBD.callback.read();
-
-	if (asyncBuffering == true) {
-		if (readChar == RNBD.async.Demiliter) {
-			asyncBuffering = false;
-			*RNBD.async.async_pHead = '\0';
-			RNBD.callback.asyncHandler(RNBD.async.async_buffer);
-		} else if (RNBD.async.async_pHead
-				< RNBD.async.async_buffer + RNBD.async.asyncBufferSize) {
-			*RNBD.async.async_pHead++ = readChar;
-		} else {
-			//do nothing
-		}
-	} else {
-		if (readChar == RNBD.async.Demiliter
-				&& (RNBD.async.skip_delimter == false)) {
-			asyncBuffering = true;
-			RNBD.async.async_pHead = RNBD.async.async_buffer;
-		} else {
-			RNBD.async.skip_delimter = true;
-			RNBD.uart.dataReady = true;
-			RNBD.async.peek = readChar;
-		}
-	}
-	return RNBD.uart.dataReady;
-}

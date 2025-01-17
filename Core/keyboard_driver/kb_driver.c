@@ -48,6 +48,13 @@ void delay_us(uint32_t us)
     while (((TIM21->CNT - start_time) & 0xFFFF) < us) {}
 }
 
+static void non_blocking_delay_ms(uint32_t ms)
+{
+	if (ms > 0xFFFF) {ms = 0xFFFF;}
+	volatile uint32_t start_time = HAL_GetTick();
+	while(((HAL_GetTick() - start_time) & 0xFFFF) < ms);
+}
+
 uint32_t getMicroseconds(void)
 {
     return TIM21->CNT;
@@ -128,6 +135,7 @@ static void setBLECallbacks(void)
 	RNBD.callback.rxIndicate = RxIndicate;
 	RNBD.callback.systemModeset = setBLEMode;
 	RNBD.callback.getConnStatus = RNBD_isConnected;
+	RNBD.callback.nonBlockDelayMs = non_blocking_delay_ms;
 }
 
 
@@ -138,12 +146,15 @@ static void setDevice_descriptor(void)
 	RNBD.device.hwVersion = (const uint8_t *)"0.1";
 	RNBD.device.fwVersion = (const uint8_t *)"0.2";
 	RNBD.device.driverVersion = (const uint8_t *)"2.0.0";
-	RNBD.device.bleSdaHid = 0x03C1; // BLE HID
+	RNBD.device.bleSdaHid = 961; // BLE HID
 }
 
 
 void initBluetooth(void)
 {
+	uint8_t retries = 3;
+	uint8_t retry = 0;
+
     LOG_DEBUG("BLE initialisation started");
 
     USBD_DeInit(&hUsbDeviceFS);
@@ -156,11 +167,13 @@ void initBluetooth(void)
     setBLECallbacks();
     setDevice_descriptor();
 
-    if(RNBD_Init()) {
+    while(retry <= retries){
+    	if(RNBD_Init()) {
         LOG_DEBUG("Setting Up Device Configuration");
 
         if(RNBD_EnterCmdMode()) {
         	LOG_DEBUG("Command Mode Entered");
+        	//RNBD_FactoryReset(SF_2);
 
         	RNBD_StopAdvertising();
             RNBD_SetName(RNBD.device.productName, PRODUCT_NAME_LEN);
@@ -201,7 +214,24 @@ void initBluetooth(void)
 				LOG_DEBUG("BLE Service Changed");
 			}
 
+
+
+			RNBD.callback.resetModule(true);
+			RNBD.callback.delayMs(RNBD_RESET_DELAY_TIME);
+			RNBD.callback.resetModule(false);
+			RNBD.callback.delayMs(RNBD_STARTUP_DELAY);
+
+
+			while (RNBD.callback.dataReady()) RNBD.callback.read();
+			LOG_INFO("RNBD3350 reboot successful, command mode entered");
+
+
 			GATT_List_Services();
+			//if(RNBD_SetServiceBitmap(0xC0)){
+				//Verify the change
+			//	RNBD_ServiceChangeIndicator();
+			//}
+
 			RNBD_EnableAdvertising();
 
             //RNBD_EnterDataMode();
@@ -213,10 +243,13 @@ void initBluetooth(void)
             LOG_INFO("Bluetooth Initialisation Passed");
 
             return;
-        }
-    }
+        	}
+    	}
 
-    LOG_WARNING("Bluetooth Initialisation failed");
+    	LOG_WARNING("Bluetooth Initialisation failed");
+    	LOG_WARNING("[%s] retry to Initialise Bluetooth", retry);
+    	retry++;
+	}
 }
 
 
@@ -341,40 +374,43 @@ void checkConnection()
 
 void checkBLEconnection(void)
 {
-    if (!ble_conn_flag) return;// Early exit if the flag is not set
+    if (!ble_conn_flag) return;
 
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
-    ble_conn_flag = false;       // Clear the flag
+    ble_conn_flag = false;
     __set_PRIMASK(primask);
 
-    // Check the connection state using RNBD_isConnected
     bool connectionStatus = RNBD.callback.getConnStatus();
     static bool prev_status = false;
     bool status_changed = false;
+    static uint32_t last_change_time = 0;
+
+    // Add debounce time after state changes
+    if (HAL_GetTick() - last_change_time < 100) {
+        return;  // Skip check if within debounce period
+    }
 
     if (!RNBD.connected && connectionStatus) {
-        // Device was disconnected but is now connected
-        RNBD.gatt.setProtocolMode();
-        // Set protocol mode
-        RNBD.connected = SET;  // Update connection status
-        RNBD.device.connection_timer = BLE_ALTERED_TIMER; // Set longer timer
-
-        LOG_DEBUG("BLE Connected: Protocol Mode Set");
+        RNBD.device.connection_timer = BLE_ALTERED_TIMER;
         status_changed = true;
+        last_change_time = HAL_GetTick();
     }
     else if (RNBD.connected && !connectionStatus) {
-        // Device was connected but is now disconnected
-        RNBD.connected = RESET;              // Update connection status
-        RNBD.device.connection_timer = BLE_DEFAULT_TIMER; // Set shorter timer
-        LOG_DEBUG("BLE Disconnected");
-        status_changed = true;
+        // Only disconnect if state has been stable
+        if (HAL_GetTick() - last_change_time > 500) {
+            RNBD.device.connection_timer = BLE_DEFAULT_TIMER;
+            LOG_DEBUG("BLE Disconnected");
+            RNBD.connected = false;
+            status_changed = true;
+            last_change_time = HAL_GetTick();
+        }
     }
 
     if (prev_status != status_changed) {
-            LOG_DEBUG("BLE connection check completed. Status: %s",
-                     RNBD.connected ? "Connected" : "Disconnected");
-        }
+        LOG_DEBUG("BLE connection check completed. Status: %s",
+                 RNBD.connected ? "Connected" : "Disconnected");
+    }
     prev_status = status_changed;
 }
 
@@ -389,7 +425,7 @@ void reportArbiter(void)
         sendUSBReport();
     }
     else if (kb_state.output_mode == OUTPUT_BLE &&
-		 	elapsedTime(kb_state.last_report.ble_last_report) >= HID_FS_BINTERVAL * 1000) {
+		 	elapsedTime(kb_state.last_report.ble_last_report) >= BLE_STD_INTERVAL * 1000) {
     	//LOG_DEBUG("BLE Report");
         sendBLEReport();
     }

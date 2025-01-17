@@ -10,7 +10,6 @@
 #include "logger.h"
 #include <main.h>
 
-
 #define UART_RX_BUFFER_SIZE 256
 #define UART_TX_BUFFER_SIZE 128
 #define UART_RX_BUFFER_MASK (UART_RX_BUFFER_SIZE - 1)
@@ -39,6 +38,8 @@ extern DMA_HandleTypeDef hdma_lpuart1_tx;
 uint8_t dma_rx_buffer[UART_RX_BUFFER_SIZE];
 uint8_t dma_tx_buffer[UART_TX_BUFFER_SIZE];
 
+extern volatile ITStatus sys_ready;
+
 
 void tx_irq_handler(void) {
     __disable_irq();
@@ -57,7 +58,8 @@ void tx_irq_handler(void) {
 void rx_irq_handler(void) {
     __disable_irq();
     ATOMIC_CLEAR_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
-    // Get actual bytes received
+
+    RNBD.async.msg_in_progress = false;
     uint16_t dma_count = __HAL_DMA_GET_COUNTER(&hdma_lpuart1_rx);
     uint16_t bytes_received = UART_RX_BUFFER_SIZE - dma_count;
 
@@ -65,16 +67,43 @@ void rx_irq_handler(void) {
         uint16_t next_head = (uart_rx_head + 1) & UART_RX_BUFFER_MASK;
 
         if(next_head != uart_rx_tail) {
-            uart_rx_buffer[uart_rx_head] = dma_rx_buffer[i];
+            uint8_t rx_byte = dma_rx_buffer[i];
+
+            // Store all data in main UART buffer
+            uart_rx_buffer[uart_rx_head] = rx_byte;
             uart_rx_head = next_head;
             uart_rx_count++;
+
+            // Handle async messages
+            if (rx_byte == '%') {
+                if (!RNBD.async.msg_in_progress) {
+                    // Start of async message
+                	RNBD.async.msg_in_progress = true;
+                    RNBD.async.async_pHead = RNBD.async.async_buffer;
+                    *RNBD.async.async_pHead++ = rx_byte;
+                } else {
+                    // End of async message
+                    *RNBD.async.async_pHead++ = rx_byte;
+                    *RNBD.async.async_pHead = '\0';
+                    if(sys_ready){
+                    	RNBD.callback.asyncHandler((char*)RNBD.async.async_buffer); //XXX
+                    }
+                    RNBD.async.msg_in_progress = false;
+                }
+            }
+            else if (RNBD.async.msg_in_progress) {
+                // Store byte in async buffer if we're between % characters
+                if (RNBD.async.async_pHead < RNBD.async.async_buffer + RNBD.async.asyncBufferSize - 1) {
+                    *RNBD.async.async_pHead++ = rx_byte;
+                }
+            }
         }
         else {
-        	LOG_DEBUG("Data: %s", uart_rx_buffer);
             LOG_WARNING("RX Buffer overflow");
             break;
         }
     }
+
     // Restart DMA reception
     HAL_UART_AbortReceive(&hlpuart1);
     if(HAL_UART_Receive_DMA(&hlpuart1, dma_rx_buffer, UART_RX_BUFFER_SIZE) != HAL_OK) {

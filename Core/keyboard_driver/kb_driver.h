@@ -20,8 +20,8 @@
 #include "usb_device.h"
 
 /*Bluetooth defines*/
-#define BLE_DEFAULT_TIMER 1000UL
-#define BLE_ALTERED_TIMER 5000UL
+#define BLE_DEFAULT_TIMER 2000UL
+#define BLE_ALTERED_TIMER 7500UL
 
 //Connection mode
 typedef enum {
