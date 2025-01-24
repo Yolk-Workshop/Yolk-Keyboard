@@ -16,12 +16,27 @@ extern "C" {
 #include "stm32l0xx_hal.h"
 #include "core_cm0plus.h"
 
+#include "stm32l0xx_ll_dma.h"
+#include "stm32l0xx_ll_i2c.h"
+#include "stm32l0xx_ll_iwdg.h"
+#include "stm32l0xx_ll_lpuart.h"
+#include "stm32l0xx_ll_rcc.h"
+#include "stm32l0xx_ll_crs.h"
+#include "stm32l0xx_ll_bus.h"
+#include "stm32l0xx_ll_system.h"
+#include "stm32l0xx_ll_exti.h"
+#include "stm32l0xx_ll_cortex.h"
+#include "stm32l0xx_ll_utils.h"
+#include "stm32l0xx_ll_pwr.h"
+#include "stm32l0xx_ll_usart.h"
+#include "stm32l0xx_ll_gpio.h"
 
-#include "../keyboard_driver/kb_driver.h"
-#include "../keyboard_driver/keys.h"
-#include "../keyboard_driver/keycodes.h"
-#include "../ble_driver/rnbd_interface.h"
-#include "../ble_driver/rnbd.h"
+
+#include "kb_driver.h"
+#include "keys.h"
+#include "keycodes.h"
+#include "rnbd_interface.h"
+#include "rnbd.h"
 
 #include "logger.h"
 #include "usb_device.h"
@@ -47,7 +62,6 @@ extern I2C_HandleTypeDef hi2c2;
 /* Keyboard State */
 extern keyboard_state_t kb_state;
 extern rnbd_interface_t RNBD;
-extern volatile uint8_t ble_conn_flag;
 
 /* Exported Constants ------------------------------------------------------*/
 /* Matrix Dimensions */
@@ -55,8 +69,6 @@ extern volatile uint8_t ble_conn_flag;
 #define KEY_COLS 14
 
 /* External Variables -----------------------------------------------------*/
-extern volatile uint8_t scan_flag;
-extern volatile uint8_t report_ready_flag;
 extern volatile ITStatus uart2_tc_flag;
 
 /* Function Prototypes --------------------------------------------------*/

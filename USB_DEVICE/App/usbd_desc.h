@@ -52,7 +52,18 @@
 #define  USB_SIZ_STRING_SERIAL       0x1A
 
 /* USER CODE BEGIN EXPORTED_CONSTANTS */
+ /** @defgroup USBD_DESC_Private_Defines USBD_DESC_Private_Defines
+   * @brief Private defines.
+   * @{
+   */
 
+ #define USBD_VID     0x6666
+ #define USBD_LANGID_STRING     1033
+ #define USBD_MANUFACTURER_STRING     "Yolk Workshop"
+ #define USBD_PID_FS     1
+ #define USBD_PRODUCT_STRING_FS     "Yolk Keyboard"
+ #define USBD_CONFIGURATION_STRING_FS     "Yolk Workshop HID Config"
+ #define USBD_INTERFACE_STRING_FS     "HID Interface"
 /* USER CODE END EXPORTED_CONSTANTS */
 
 /**

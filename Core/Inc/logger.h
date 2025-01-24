@@ -13,7 +13,7 @@
 #include <string.h>
 
 #define LOG_BUFFER_COUNT 8  // Number of buffers in the queue
-#define LOG_BUFFER_SIZE 256 // Size of each buffer
+#define LOG_BUFFER_SIZE 64 // Size of each buffer
 
 typedef struct {
     char buffers[LOG_BUFFER_COUNT][LOG_BUFFER_SIZE];
@@ -34,7 +34,6 @@ typedef enum {
 
 // Buffer size for log messages
 #define COUNTOF(__BUFFER__)   (sizeof(__BUFFER__) / sizeof(*(__BUFFER__)))
-#define BUFFER_SIZE 128
 
 // Default debug level (can be modified during compilation)
 #ifndef DEBUG_LEVEL

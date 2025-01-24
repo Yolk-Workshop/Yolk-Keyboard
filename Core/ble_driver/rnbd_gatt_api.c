@@ -13,7 +13,7 @@
 
 static const uint8_t hidInfo[] = {
 		0x11, 0x01,
-		0x00, 0x02
+		0x00, 0x01
 }; // HID Version 1.11, No Country Code, Boot Protocol Supported
 
 static const uint8_t pnp_id[] = {
@@ -23,52 +23,62 @@ static const uint8_t pnp_id[] = {
     0x00, 0x01  // Product Version: 1.0.0
 };
 
-static const uint8_t keyboardReportDescriptor[] = {
-    0x05, 0x01,       // Usage Page (Generic Desktop)
+__ALIGN_BEGIN static const uint8_t HID_KEYBOARD_ReportDesc[80] __ALIGN_END =
+{
+    0x05, 0x01,       // Usage Page (Generic Desktop Controls)
     0x09, 0x06,       // Usage (Keyboard)
     0xA1, 0x01,       // Collection (Application)
 
-    // Modifier keys
-    0x05, 0x07,       // Usage Page (Keyboard)
-    0x19, 0xE0,       // Usage Minimum (Left Control)
-    0x29, 0xE7,       // Usage Maximum (Right GUI)
+    // Modifier Keys
+    0x05, 0x07,       // Usage Page (Keyboard/Keypad)
+    0x19, 0xE0,       // Usage Minimum (224 - Left Control)
+    0x29, 0xE7,       // Usage Maximum (231 - Right GUI)
     0x15, 0x00,       // Logical Minimum (0)
     0x25, 0x01,       // Logical Maximum (1)
     0x75, 0x01,       // Report Size (1)
     0x95, 0x08,       // Report Count (8)
     0x81, 0x02,       // Input (Data, Variable, Absolute)
 
-    // Reserved byte
-    0x95, 0x01,       // Report Count (1)
+    // Reserved Byte
     0x75, 0x08,       // Report Size (8)
+    0x95, 0x01,       // Report Count (1)
     0x81, 0x01,       // Input (Constant)
 
-    // LED output report
-    0x95, 0x05,       // Report Count (5)
+    // LED Output Report (Num Lock, Caps Lock, etc.)
+    0x95, 0x05,       // Report Count (5 LEDs)
     0x75, 0x01,       // Report Size (1)
     0x05, 0x08,       // Usage Page (LEDs)
-    0x19, 0x01,       // Usage Minimum (Num Lock)
-    0x29, 0x05,       // Usage Maximum (Kana)
+    0x19, 0x01,       // Usage Minimum (1 - Num Lock)
+    0x29, 0x05,       // Usage Maximum (5 - Kana)
     0x91, 0x02,       // Output (Data, Variable, Absolute)
 
-    // Padding
+    // Padding for LED output
     0x95, 0x01,       // Report Count (1)
     0x75, 0x03,       // Report Size (3)
     0x91, 0x01,       // Output (Constant)
 
-    // Regular keys
-    0x95, 0x06,       // Report Count (6)
-    0x75, 0x08,       // Report Size (8)
+    // Boot Protocol Keys (6KRO)
+    0x05, 0x07,       // Usage Page (Keyboard/Keypad)
+    0x19, 0x00,       // Usage Minimum (Reserved)
+    0x29, 0x65,       // Usage Maximum (101 - Application)
     0x15, 0x00,       // Logical Minimum (0)
     0x25, 0x65,       // Logical Maximum (101)
-    0x05, 0x07,       // Usage Page (Keyboard)
-    0x19, 0x00,       // Usage Minimum (Reserved)
-    0x29, 0x65,       // Usage Maximum (Keyboard Application)
+    0x75, 0x08,       // Report Size (8)
+    0x95, 0x06,       // Report Count (6)
     0x81, 0x00,       // Input (Data, Array)
+
+    // NKRO Bitmap (80 Keys = 10 Bytes)
+    0x75, 0x01,       // Report Size (1)
+    0x95, 0x50,       // Report Count (80 keys)
+    0x05, 0x07,       // Usage Page (Keyboard/Keypad)
+    0x19, 0x00,       // Usage Minimum (Reserved)
+    0x29, 0x4F,       // Usage Maximum (79)
+    0x15, 0x00,       // Logical Minimum (0)
+    0x25, 0x01,       // Logical Maximum (1)
+    0x81, 0x02,       // Input (Data, Variable, Absolute)
 
     0xC0              // End Collection
 };
-
 
 // Expected response for successful commands
 static const uint8_t expectedResponse[] = { 'A', 'O', 'K', '\r', '\n', 'C', 'M', 'D', '>', ' ' };
@@ -89,16 +99,13 @@ static void GATT_setEventCallbacks(void){
 	RNBD.gatt.events.gatt_write = GATT_writeCharacteristic;
 	RNBD.gatt.events.gatt_notification = GATT_writeCharacteristic;
 	RNBD.gatt.events.gatt_configure_hid = GATT_configureHID;
-	RNBD.gatt.events.gatt_indication = NULL;
-	RNBD.gatt.events.gatt_memory_error = NULL;
 	RNBD.gatt.events.rediscovery_required = NULL;
 }
 
 static bool GATT_InitDeviceInfoService(void) {
     bool result = true;
-
     // Initialize Device Information Service
-    result &= GATT_defineService((uint8_t*)DEVICE_INFO_UUID, 4);
+    result &= GATT_defineService((uint8_t*)DEVICE_INFO_UUID, sizeof(DEVICE_INFO_UUID));
 
     // Add PnP ID Characteristic
     result &= GATT_defineCharacteristic(
@@ -135,7 +142,7 @@ static bool GATT_InitBatteryService(void) {
 
 	set_Handle(0x1005, RNBD.gatt.batterylevelHandle);
 
-	uint8_t battery_level = 99;
+	uint8_t battery_level = 95;
 	GATT_writeCharacteristic((const uint8_t*)RNBD.gatt.batterylevelHandle,&battery_level, 1);
 
 	return result;
@@ -154,7 +161,7 @@ static bool GATT_InitHIDService(void) {
 		(uint8_t*)HID_REPORT_MAP_UUID,
 		4,
 		PROPERTY_READ | PROPERTY_AUTHENTICATED,
-		sizeof(keyboardReportDescriptor)
+		sizeof(HID_KEYBOARD_ReportDesc)
 	);
 
 	current_handle += 2;
@@ -162,22 +169,22 @@ static bool GATT_InitHIDService(void) {
 
 	// Write Report Map Descriptor
 	result &= GATT_writeCharacteristic(RNBD.gatt.reportMapHandle,
-			keyboardReportDescriptor, sizeof(keyboardReportDescriptor));
+			HID_KEYBOARD_ReportDesc, sizeof(HID_KEYBOARD_ReportDesc));
 
 //------------------------------------------------------------------------------------------------------
 	// Protocol Mode characteristic
-		result &= GATT_defineCharacteristic(
-			(uint8_t*)HID_PROTOCOL_MODE_UUID,
-			4,
-			PROPERTY_READ | PROPERTY_WRITE_NO_ACK | PROPERTY_AUTHENTICATED,
-			1  // Size: 1 byte
-		);
+	result &= GATT_defineCharacteristic(
+		(uint8_t*)HID_PROTOCOL_MODE_UUID,
+		4,
+		PROPERTY_READ | PROPERTY_WRITE_NO_ACK | PROPERTY_AUTHENTICATED,
+		1  // Size: 1 byte
+	);
 
-		current_handle += 2;
-		set_Handle(current_handle, RNBD.gatt.protocolModeHandle);
+	current_handle += 2;
+	set_Handle(current_handle, RNBD.gatt.protocolModeHandle);
 
-		uint8_t data = 0;
-		result &= GATT_writeCharacteristic((const uint8_t*)RNBD.gatt.protocolModeHandle, &(data), sizeof(data));
+	uint8_t data = 0x01;
+	result &= GATT_writeCharacteristic((const uint8_t*)RNBD.gatt.protocolModeHandle, &(data), sizeof(data));
 //----------------------------------------------------------------------------------------------------
 
     // HID Information characteristic
@@ -224,6 +231,7 @@ static bool GATT_InitHIDService(void) {
     		enable_notifications, 2);
 
     current_handle += 1;  // Skip handle for CCCD
+
     set_Handle(current_handle, RNBD.gatt.inputReportHandle);
 
     // Output Report characteristic
@@ -236,30 +244,9 @@ static bool GATT_InitHIDService(void) {
     current_handle += 2;
     set_Handle(current_handle, RNBD.gatt.outputReportHandle);
 
+    uint8_t outputReport = 0x00; // Initial LED state
+    result &= GATT_writeCharacteristic(RNBD.gatt.outputReportHandle, &outputReport, 1);
 
-//--------------------------------------------------------------------------------------------------------
-    // Boot Keyboard Input Report
-    result &= GATT_defineCharacteristic(
-        (uint8_t*)HID_BOOT_KEYBOARD_IN_UUID,
-        4,
-        PROPERTY_READ | PROPERTY_NOTIFY,
-        8  // Size: 8 bytes
-    );
-    current_handle += 2;
-    set_Handle(current_handle, RNBD.gatt.bootReferenceHandle);
-
-    current_handle += 1;  // Skip handle for CCCD
-    set_Handle(current_handle, RNBD.gatt.bootInputHandle);
-
-    // Boot Keyboard Output Report
-    result &= GATT_defineCharacteristic(
-        (uint8_t*)HID_BOOT_KEYBOARD_OUT_UUID,
-        4,
-        PROPERTY_READ | PROPERTY_WRITE | PROPERTY_WRITE_NO_ACK,
-        1  // Size: 1 byte for LED states
-    );
-    current_handle += 2;
-    set_Handle(current_handle, RNBD.gatt.bootOutputHandle);
 
     if (!result) {
         LOG_ERROR("HID Service Initialization Failed");
@@ -270,8 +257,6 @@ static bool GATT_InitHIDService(void) {
 
 bool GATT_HID_Init(void) {
     bool result = true;
-
-
 
     // Initialize Device Information Service
     result &= GATT_InitDeviceInfoService();
@@ -291,20 +276,6 @@ bool GATT_HID_Init(void) {
     LOG_DEBUG("GATT Profile Initialization %s", result ? "Successful" : "Failed");
     return result;
 }
-
-static bool enableHIDNotifications() {
-    bool result = true;
-
-    // Enable notifications for Input Report (handle 100B)
-    result &= GATT_configureCCCD((const uint8_t*)"100B", true, false);
-
-    // Enable notifications for Boot Input Report (handle 1010)
-    result &= GATT_configureCCCD((const uint8_t*)"1010", true, false);
-
-    LOG_DEBUG("HID Notifications %s", result ? "Enabled" : "Failed");
-    return result;
-}
-
 
 bool GATT_ble_Init(void)
 {
@@ -492,68 +463,6 @@ void GATT_readCharacteristic(const uint8_t* handle, uint8_t dataLen)
 	LOG_INFO("SHR: %s", responseBuffer);
 }
 
-/**
- * Send notification using IE command
- */
-bool GATT_transmitCharacteristic(const uint8_t* handle, const uint8_t* data, uint8_t dataLen)
-{
-    if (data == NULL || handle == NULL || dataLen == 0 ||
-        ((dataLen * 2) + 15) > RNBD_BUFFER_SIZE) {
-        return false;
-    }
-
-    // Get current connection info
-    connection_info_t* current = &RNBD.gatt.connections[RNBD.gatt.current_connection];
-    if (!current->active) {
-        return false;
-    }
-
-    // Calculate total length (handle + data)
-    uint8_t totalLen = 4 + dataLen;  // 4 bytes for handle + data length
-
-    // Construct "IE,<connhandle>,<length>,<handle+data>\r\n"
-    uint8_t cmdLen = 0;
-    RNBD.uart.command_buffer[cmdLen++] = 'I';
-    RNBD.uart.command_buffer[cmdLen++] = 'E';
-    RNBD.uart.command_buffer[cmdLen++] = ',';
-
-    // Add connection handle
-    for (uint8_t i = 0; i < CONN_HANDLE_LEN; i++) {
-        RNBD.uart.command_buffer[cmdLen++] = current->conn_handle[i];
-    }
-
-    // Add total length as 16-bit hex (4 characters)
-    RNBD.uart.command_buffer[cmdLen++] = ',';
-    RNBD.uart.command_buffer[cmdLen++] = NIBBLE2ASCII((totalLen >> 12) & 0x0F);
-    RNBD.uart.command_buffer[cmdLen++] = NIBBLE2ASCII((totalLen >> 8) & 0x0F);
-    RNBD.uart.command_buffer[cmdLen++] = NIBBLE2ASCII((totalLen >> 4) & 0x0F);
-    RNBD.uart.command_buffer[cmdLen++] = NIBBLE2ASCII(totalLen & 0x0F);
-
-    // Add characteristic handle and data
-    RNBD.uart.command_buffer[cmdLen++] = ',';
-
-    // Add characteristic handle
-    for (uint8_t i = 0; i < 4; i++) {
-        RNBD.uart.command_buffer[cmdLen++] = handle[i];
-    }
-
-    // Add data as hex
-    for (uint8_t i = 0; i < dataLen; i++) {
-        RNBD.uart.command_buffer[cmdLen++] = NIBBLE2ASCII(data[i] >> 4);
-        RNBD.uart.command_buffer[cmdLen++] = NIBBLE2ASCII(data[i] & 0x0F);
-    }
-
-    RNBD.uart.command_buffer[cmdLen++] = '\r';
-    RNBD.uart.command_buffer[cmdLen++] = '\n';
-
-    LOG_DEBUG("Report : %s", RNBD.uart.command_buffer);
-
-    return RNBD_SendCommand_ReceiveResponse(RNBD.uart.command_buffer,
-                                          cmdLen,
-                                          expectedResponse,
-                                          sizeof(expectedResponse));
-}
-
 
 bool GATT_clearProfile(void)
 {
@@ -608,12 +517,14 @@ void GATT_List_Services(void) {
     }
 
     // Debug output
+    /*
     LOG_DEBUG("Total bytes read: %d", responseRead);
     LOG_DEBUG("LS: %.50s", responseBuffer);
     LOG_DEBUG("LS: %.50s", &responseBuffer[50]);
     LOG_DEBUG("LS: %.50s", &responseBuffer[100]);
     LOG_DEBUG("LS: %.50s", &responseBuffer[150]);
     LOG_DEBUG("LS: %.50s", &responseBuffer[200]);
+    */
 }
 
 
@@ -623,13 +534,7 @@ bool GATT_sendHIDReport(const uint8_t *data, uint8_t dataLen) {
         LOG_DEBUG("No connection");
         return false;
     }
-
-    if(!RNBD.gatt.ccd_state.input_report_notifications) {
-        LOG_DEBUG("Notifications not enabled");
-        return false;
-    }
-
-    return GATT_writeCharacteristic(RNBD.gatt.inputReportHandle, data, dataLen);
+    return GATT_writeCharacteristic(RNBD.gatt.referenceReportHandle, data, dataLen);
 }
 
 /**
@@ -648,25 +553,18 @@ bool GATT_configureCCCD(const uint8_t* handle, bool notifications, bool indicati
 
         // Track which characteristic is being enabled
         if (strcmp(handle_str, "100B") == 0) {
-            RNBD.gatt.ccd_state.input_report_notifications = true;
+            RNBD.gatt.input_report_notifications = true;
             LOG_DEBUG("Input Report notifications enabled");
         }
-        else if (strcmp(handle_str, "1010") == 0) {
-            RNBD.gatt.ccd_state.boot_input_notifications = true;
-            LOG_DEBUG("Boot Input notifications enabled");
-        }
+
     } else {
         value[0] = 0x00;
         value[1] = 0x00;
 
         // Track which characteristic is being disabled
         if (strcmp(handle_str, "100B") == 0) {
-            RNBD.gatt.ccd_state.input_report_notifications = false;
+            RNBD.gatt.input_report_notifications = false;
             LOG_DEBUG("Input Report notifications disabled");
-        }
-        else if (strcmp(handle_str, "1010") == 0) {
-            RNBD.gatt.ccd_state.boot_input_notifications = false;
-            LOG_DEBUG("Boot Input notifications disabled");
         }
     }
 

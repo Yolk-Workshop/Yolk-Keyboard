@@ -106,44 +106,11 @@ typedef enum {
     KC_DOWN = 0x51,       // DownArrow
     KC_UP = 0x52,         // UpArrow
 
-    // Keypad (0x53-0x63)
-    KC_NUMLOCK = 0x53,    // Keypad Num Lock and Clear
-    KC_KP_SLASH = 0x54,   // Keypad /
-    KC_KP_ASTERISK = 0x55,// Keypad *
-    KC_KP_MINUS = 0x56,   // Keypad -
-    KC_KP_PLUS = 0x57,    // Keypad +
-    KC_KP_ENTER = 0x58,   // Keypad ENTER
-    KC_KP_1 = 0x59,       // Keypad 1 and End
-    KC_KP_2 = 0x5A,       // Keypad 2 and Down Arrow
-    KC_KP_3 = 0x5B,       // Keypad 3 and PageDn
-    KC_KP_4 = 0x5C,       // Keypad 4 and Left Arrow
-    KC_KP_5 = 0x5D,       // Keypad 5
-    KC_KP_6 = 0x5E,       // Keypad 6 and Right Arrow
-    KC_KP_7 = 0x5F,       // Keypad 7 and Home
-    KC_KP_8 = 0x60,       // Keypad 8 and Up Arrow
-    KC_KP_9 = 0x61,       // Keypad 9 and PageUp
-    KC_KP_0 = 0x62,       // Keypad 0 and Insert
-    KC_KP_DOT = 0x63,     // Keypad . and Delete
-
     // Additional keys (0x64-0x67)
     KC_NONUS_BSLASH = 0x64, // Non-US \ and |
     KC_APPLICATION = 0x65,   // Application (Menu)
     KC_POWER = 0x66,        // Power
     KC_KP_EQUAL = 0x67,     // Keypad =
-
-    // Function keys continued (0x68-0x73)
-    KC_F13 = 0x68,
-    KC_F14 = 0x69,
-    KC_F15 = 0x6A,
-    KC_F16 = 0x6B,
-    KC_F17 = 0x6C,
-    KC_F18 = 0x6D,
-    KC_F19 = 0x6E,
-    KC_F20 = 0x6F,
-    KC_F21 = 0x70,
-    KC_F22 = 0x71,
-    KC_F23 = 0x72,
-    KC_F24 = 0x73,
 
     // System control (0x74-0x7F)
     KC_EXECUTE = 0x74,

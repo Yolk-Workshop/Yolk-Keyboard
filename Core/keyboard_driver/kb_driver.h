@@ -49,7 +49,7 @@ void scanKeyMatrix(void);
 void sendUSBReport(void);
 void sendBLEReport(void);
 void checkConnection(void);
-void checkBLEconnection(void);
+void checkBLEconnection();
 void reportArbiter(void);
 
 /* Matrix pin definitions */

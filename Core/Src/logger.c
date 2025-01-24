@@ -1,7 +1,7 @@
 #include "logger.h"
 #include <stdarg.h>
 
-static char uart_buffer[BUFFER_SIZE];
+static char uart_buffer[LOG_BUFFER_SIZE];
 
 /**
  * @brief Format a message and pass it to the output function

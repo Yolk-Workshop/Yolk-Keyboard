@@ -21,7 +21,7 @@
 #define TX_BUFFER_SIZE     128
 #define GATT_HANDLE_SIZE 4
 
-#define MAX_CONNECTIONS 8
+#define MAX_CONNECTIONS 3
 #define MAC_ADDR_LEN 18   // "A434D98188CC"
 #define CONN_HANDLE_LEN 4 // "0072"
 
@@ -30,12 +30,6 @@
  * @enum RNBD_SYSTEM_MODES_t
  * @brief Enum of the RNBD System Configuration Modes
  */
-typedef enum
-{
-    TEST_MODE           = 0x00,
-    APPLICATION_MODE    = 0x01
-}RNBD_sys_modes_t;
-
 
 typedef enum {
 	RNBD_OK = 0,
@@ -58,8 +52,6 @@ typedef struct
     uint8_t (*read)(void);
     //TX buffer red to transmit data
     bool (*transmitReady)(void);
-    // RNBD Mode pin set
-    void (*systemModeset)(RNBD_sys_modes_t);
     // RNBD RX_IND pin control
     void (*rxIndicate)(bool);
     // RNBD Reset pin control
@@ -80,10 +72,8 @@ typedef struct
 typedef struct {
 	bool (*gatt_configure_hid)(void);
 	bool (*gatt_notification)(const uint8_t* handle, const uint8_t* value, uint8_t len);
-	bool (*gatt_indication)(const uint8_t* handle, const uint8_t* value, uint8_t len);
 	bool (*gatt_write)(const uint8_t* handle, const uint8_t* value, uint8_t len);
 	bool (*gatt_cccd)(const uint8_t* handle, bool notifications, bool indications);
-	void (*gatt_memory_error)(void);
     bool (*rediscovery_required)(void);
 } gatt_event_callbacks_t;
 
@@ -99,11 +89,6 @@ typedef struct
 	volatile bool msg_in_progress;
 }RNBD_async_t;
 
-
-typedef struct {
-    bool input_report_notifications;
-    bool boot_input_notifications;
-} gatt_ccd_state_t;
 
 
 typedef struct {
@@ -124,10 +109,6 @@ typedef struct
 	const uint8_t *driverVersion;
 	uint16_t bleSdaHid;
 
-	/* Configuration Parameters */
-	uint8_t tx_power;             // Transmit power level (0-15)
-	int8_t rssi;                // Signal strength
-
 	uint32_t connection_timer;
 }RNBD_dev_t;
 
@@ -137,11 +118,7 @@ typedef struct {
     uint8_t inputReportHandle[GATT_HANDLE_SIZE];       // 100B - NOTIFY
     uint8_t outputReportHandle[GATT_HANDLE_SIZE];      // 100D - READ|WRITE|WRITE_NO_RESPONSE
     uint8_t protocolModeHandle[GATT_HANDLE_SIZE];      // 1002
-
-    uint8_t bootReferenceHandle[GATT_HANDLE_SIZE];     // 100F - READ
-    uint8_t bootInputHandle[GATT_HANDLE_SIZE];         // 1010 - NOTIFY
-    uint8_t bootOutputHandle[GATT_HANDLE_SIZE];        // 1012 - READ|WRITE|WRITE_NO_RESPONSE
-    gatt_ccd_state_t ccd_state;
+    bool input_report_notifications;
 
     uint8_t hidInfoHandle[GATT_HANDLE_SIZE];           // 1006
     uint8_t reportMapHandle[GATT_HANDLE_SIZE];         // 1004
@@ -159,6 +136,7 @@ typedef struct {
 
 	//callbacks
 	gatt_event_callbacks_t events;
+	uint8_t buffer[16];
 } RNBD_gatt_state_t;
 
 

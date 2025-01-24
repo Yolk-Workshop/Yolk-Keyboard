@@ -142,8 +142,7 @@ static void handleDisconnect(const char* message) {
         if(memcmp(RNBD.gatt.connections[i].mac_addr, mac, MAC_ADDR_LEN) == 0) {
             RNBD.gatt.connections[i].active = false;
             // Reset CCD states
-            RNBD.gatt.ccd_state.input_report_notifications = false;
-            RNBD.gatt.ccd_state.boot_input_notifications = false;
+            RNBD.gatt.input_report_notifications = false;
             LOG_DEBUG("Device disconnected: %.12s", mac);
             break;
         }
@@ -163,48 +162,62 @@ static void handleOTARequest(void) {
     }
 }
 
+static void getValue(const char* value, uint8_t len, uint8_t* data_buffer)
+{
+	char temp[3] = {0}; // Temporary buffer for 2 hex chars + null terminator
+
+	// Parse the string into the buffer
+	for (size_t i = 0; i < len; i += 2) {
+		temp[0] = value[i];
+		temp[1] = (i + 1 < len) ? value[i + 1] : '0'; // Handle odd length
+		data_buffer[i / 2] = (uint8_t)strtol(temp, NULL, 16);
+	}
+}
+
 // Handle characteristic write
 static void handleWriteValue(const char* message) {
     char handle[5] = {0};
     char value[RNBD_BUFFER_SIZE] = {0};
-    RNBD.callback.nonBlockDelayMs(6);// 7.5 ms
-    //LOG_DEBUG("Writing Value");
+    RNBD.callback.nonBlockDelayMs(6); // 7.5 ms delay
 
     if (scanMsg(message, handle, value) == 2) {
-        uint8_t data = (uint8_t)strtol(value, NULL, 16);
-        LOG_DEBUG("Handle:%s ,Data: %d", handle, data);
+        size_t value_len = strlen(value);
+        if (value_len % 2 != 0) {
+            LOG_WARNING("Hexadecimal string has odd length: %s", value);
+        }
 
+        getValue(value, value_len, RNBD.gatt.buffer);
 
-        if (strcmp(handle,"100B") == 0) {
-           // LOG_DEBUG("Setting Protocol Mode");
-            if (data == 1 && RNBD.gatt.events.gatt_write) {
+        LOG_DEBUG("Handle: %s, Data: %s", handle, value);
 
-                //LOG_DEBUG("Calling gatt_write for protocol mode");
-                RNBD.gatt.events.gatt_write((const uint8_t*)handle, &data, sizeof(data));
-                LOG_DEBUG("Protocol Mode changed to: %d", data);
+        if (strcmp(handle, "100B") == 0) { // Protocol Mode
+            if (RNBD.gatt.events.gatt_write) {
+                RNBD.gatt.events.gatt_write(
+                    (const uint8_t*)handle, RNBD.gatt.buffer, value_len / 2);
+                LOG_DEBUG("Protocol Mode changed");
                 return;
             }
         }
 
-        if(strcmp(handle,"1006") == 0){
-        	 if (RNBD.gatt.events.gatt_write) {
-        		 uint8_t data = (uint8_t)strtol(value, NULL, 16);
-				//LOG_DEBUG("Calling gatt_write for protocol mode");
-				RNBD.gatt.events.gatt_write((const uint8_t*)handle, &data, sizeof(data));
-				return;
-			}
+        if (strcmp(handle, "1006") == 0) { // Another handle
+            if (RNBD.gatt.events.gatt_write) {
+                RNBD.gatt.events.gatt_write(
+                    (const uint8_t*)handle, RNBD.gatt.buffer, value_len / 2);
+                return;
+            }
         }
+
         // Output Report write (LED states)
-        else if (strcmp(handle, "100D") == 0) {
-            //LOG_DEBUG("Updating LED State");
-            GATT_updateLEDState(data);
+        if (strcmp(handle, "100D") == 0) {
+            GATT_updateLEDState(RNBD.gatt.buffer[0]);
             return;
         }
 
-        // Call write callback if registered
+        // Generic write callback
         if (RNBD.gatt.events.gatt_write) {
             LOG_DEBUG("Calling generic write callback");
-            RNBD.gatt.events.gatt_write((const uint8_t*)handle, &data, sizeof(data));
+            RNBD.gatt.events.gatt_write(
+                (const uint8_t*)handle, RNBD.gatt.buffer, value_len / 2);
         }
     } else {
         LOG_WARNING("Failed to parse write value message");
@@ -214,16 +227,34 @@ static void handleWriteValue(const char* message) {
 
 // Handle notification
 static void handleNotification(const char* message) {
-    char handle[5] = {0};
-    char value[RNBD_BUFFER_SIZE] = {0};
+    char handle[5] = {0};              // Buffer for the handle
+    char value[RNBD_BUFFER_SIZE] = {0}; // Buffer for the value
 
     if (scanMsg(message, handle, value) == 2) {
         LOG_DEBUG("Notification from handle %.4s: %s", handle, value);
-        uint8_t data = (uint8_t)strtol(value, NULL, 16);
-        if (RNBD.gatt.events.gatt_notification) {
-            RNBD.gatt.events.gatt_notification((const uint8_t*)handle, &data, sizeof(data));
+
+        // Calculate the length of the value string
+        size_t value_len = strlen(value);
+        if (value_len == 0 || value_len % 2 != 0) {
+            LOG_ERROR("Invalid value length for notification: %s", value);
+            return;
         }
-    }
+
+        // Buffer to hold parsed data
+        uint8_t data_buffer[RNBD_BUFFER_SIZE / 2] = {0}; // Max size for half of RNBD_BUFFER_SIZE
+
+        // Parse the value into the data buffer
+        getValue(value, value_len, data_buffer);
+
+        // Trigger the notification callback
+        if (RNBD.gatt.events.gatt_notification) {
+            RNBD.gatt.events.gatt_notification((const uint8_t*)handle, data_buffer, value_len / 2);
+        } else {
+            LOG_WARNING("No gatt_notification callback registered");
+        }
+    } else {
+        LOG_WARNING("Failed to parse notification message");
+	}
 }
 
 // Handle indication
@@ -233,31 +264,43 @@ static void handleIndication(const char* message) {
 
     if (scanMsg(message, handle, value) == 2) {
         LOG_DEBUG("Indication from handle %.4s: %s", handle, value);
-        uint8_t data = (uint8_t)strtol(value, NULL, 16);
-        if (RNBD.gatt.events.gatt_indication) {
-            RNBD.gatt.events.gatt_indication((const uint8_t*)handle, &data, sizeof(data));
-        }
     }
 }
+
 
 // Handle CCCD write
 static void handleWriteConfig(const char* message) {
-    char handle[5] = {0};
-    char value[5] = {0};
+    char handle[5] = {0}; // Buffer for the handle
+    char value[5] = {0};  // Buffer for the 4-character hexadecimal value
 
     if (scanMsg(message, handle, value) == 2) {
-        uint16_t config = (uint16_t)strtol(value, NULL, 16);
-        bool notifications = (config & 0x0001) ? true : false;
-        bool indications = (config & 0x0002) ? true : false;
+        // Validate and convert value to a 16-bit configuration
+        char* endptr;
+        uint16_t config = (uint16_t)strtol(value, &endptr, 16);
+
+        if (*endptr != '\0') {
+            LOG_ERROR("Invalid CCCD value: %s", value);
+            return;
+        }
+
+        // Decode CCCD bits
+        bool notifications = (config & 0x0001) != 0;
+        bool indications = (config & 0x0002) != 0;
 
         LOG_DEBUG("CCCD Write on handle %.4s: notifications=%d, indications=%d",
-                 handle, notifications, indications);
+                  handle, notifications, indications);
 
+        // Trigger the CCCD callback
         if (RNBD.gatt.events.gatt_cccd) {
             RNBD.gatt.events.gatt_cccd((const uint8_t*)handle, notifications, indications);
+        } else {
+            LOG_WARNING("No CCCD callback registered");
         }
+    } else {
+        LOG_WARNING("Failed to parse CCCD write message");
     }
 }
+
 
 
 // Main message handler
@@ -337,10 +380,7 @@ void asyncMessageHandler(char* message)
             break;
 
         case MSG_MEMORY_ERROR:
-           // LOG_ERROR("RNBD Memory Error Detected");
-            if (RNBD.gatt.events.gatt_memory_error) {
-                RNBD.gatt.events.gatt_memory_error();
-            }
+           LOG_ERROR("RNBD Memory Error Detected");
             break;
 
         default:

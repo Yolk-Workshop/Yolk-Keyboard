@@ -161,21 +161,6 @@ typedef enum
     SF_2 = 2,   //Reset to factory default including private services and script
 }RNBD_FACTORY_RESET_MODE_t;
 
-
-/**
- * @ingroup rnbd
- * @enum RNBD_DEFAULT_SERVICE_BITMAP_t
- * @brief Defines the default services options for the {nameUpperCase} driver
- */
-typedef enum
-{
-    SS_DEVICE_INFO = 0X80,
-    SS_UART_TRANSPARENT = 0x40,
-    SS_BEACON = 0x20,
-    SS_RESERVED = 0x10,
-}RNBD_DEFAULT_SERVICE_BITMAP_t;
-
-
 /**
  * @ingroup rnbd
  * @union rnbd_gpio_ioBitMap_t

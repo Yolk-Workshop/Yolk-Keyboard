@@ -54,7 +54,7 @@ typedef enum {
 typedef struct {
     ConnectionCheckState state;
     uint32_t startTime;
-    uint8_t responseBuffer[128];  // Reduced from 128 as we need very little
+    uint8_t responseBuffer[128];
     uint8_t responseRead;
     bool isConnected;
 } ConnectionCheck_t;
@@ -231,7 +231,7 @@ bool RNBD_SendCommand_ReceiveResponse(const uint8_t *cmdMsg, uint8_t cmdLen,
 	uint32_t startTime = HAL_GetTick();
 	while (!RNBD.callback.dataReady() || (HAL_GetTick() - startTime)  <= RESPONSE_TIMEOUT) {
 	}
-	//LOG_DEBUG("Response Retrieved");
+
 	//Read Ready data
 	while (RNBD.callback.dataReady()) {
 		RNBD.uart.resp[ResponseRead] = RNBD.callback.read();

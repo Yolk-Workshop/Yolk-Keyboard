@@ -16,49 +16,15 @@
   *
   ******************************************************************************
   */
-/* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-/* USER CODE BEGIN Includes */
 
-/* USER CODE END Includes */
 extern DMA_HandleTypeDef hdma_lpuart1_rx;
 extern DMA_HandleTypeDef hdma_lpuart1_tx;
 extern DMA_HandleTypeDef hdma_usart2_tx;
 /* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN TD */
 
-/* USER CODE END TD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN Define */
-
-/* USER CODE END Define */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN Macro */
-
-/* USER CODE END Macro */
-
-/* Private variables ---------------------------------------------------------*/
-/* USER CODE BEGIN PV */
-
-/* USER CODE END PV */
-
-/* Private function prototypes -----------------------------------------------*/
-/* USER CODE BEGIN PFP */
-
-/* USER CODE END PFP */
-
-/* External functions --------------------------------------------------------*/
-/* USER CODE BEGIN ExternalFunctions */
-
-/* USER CODE END ExternalFunctions */
-
-/* USER CODE BEGIN 0 */
-
-/* USER CODE END 0 */
 
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
                     /**
@@ -67,18 +33,11 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 void HAL_MspInit(void)
 {
 
-  /* USER CODE BEGIN MspInit 0 */
-
-  /* USER CODE END MspInit 0 */
-
   __HAL_RCC_SYSCFG_CLK_ENABLE();
   __HAL_RCC_PWR_CLK_ENABLE();
 
   /* System interrupt init*/
 
-  /* USER CODE BEGIN MspInit 1 */
-
-  /* USER CODE END MspInit 1 */
 }
 
 /**
@@ -92,9 +51,7 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   if(hi2c->Instance==I2C1)
   {
-  /* USER CODE BEGIN I2C1_MspInit 0 */
 
-  /* USER CODE END I2C1_MspInit 0 */
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**I2C1 GPIO Configuration
@@ -110,15 +67,9 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
 
     /* Peripheral clock enable */
     __HAL_RCC_I2C1_CLK_ENABLE();
-  /* USER CODE BEGIN I2C1_MspInit 1 */
-
-  /* USER CODE END I2C1_MspInit 1 */
   }
   else if(hi2c->Instance==I2C2)
   {
-  /* USER CODE BEGIN I2C2_MspInit 0 */
-
-  /* USER CODE END I2C2_MspInit 0 */
 
     __HAL_RCC_GPIOB_CLK_ENABLE();
     /**I2C2 GPIO Configuration
@@ -134,9 +85,6 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
 
     /* Peripheral clock enable */
     __HAL_RCC_I2C2_CLK_ENABLE();
-  /* USER CODE BEGIN I2C2_MspInit 1 */
-
-  /* USER CODE END I2C2_MspInit 1 */
   }
 
 }
@@ -151,9 +99,6 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef* hi2c)
 {
   if(hi2c->Instance==I2C1)
   {
-  /* USER CODE BEGIN I2C1_MspDeInit 0 */
-
-  /* USER CODE END I2C1_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_I2C1_CLK_DISABLE();
 
@@ -165,15 +110,10 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef* hi2c)
 
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_10);
 
-  /* USER CODE BEGIN I2C1_MspDeInit 1 */
-
-  /* USER CODE END I2C1_MspDeInit 1 */
   }
   else if(hi2c->Instance==I2C2)
   {
-  /* USER CODE BEGIN I2C2_MspDeInit 0 */
 
-  /* USER CODE END I2C2_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_I2C2_CLK_DISABLE();
 
@@ -185,9 +125,6 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef* hi2c)
 
     HAL_GPIO_DeInit(GPIOB, GPIO_PIN_11);
 
-  /* USER CODE BEGIN I2C2_MspDeInit 1 */
-
-  /* USER CODE END I2C2_MspDeInit 1 */
   }
 
 }
@@ -203,9 +140,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   if(huart->Instance==LPUART1)
   {
-  /* USER CODE BEGIN LPUART1_MspInit 0 */
 
-  /* USER CODE END LPUART1_MspInit 0 */
     /* Peripheral clock enable */
     __HAL_RCC_LPUART1_CLK_ENABLE();
 

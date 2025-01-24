@@ -21,7 +21,7 @@
 #define NKRO_SIZE 6
 #define NKRO_EXT_SIZE 8
 
-#define DEBOUNCE_TIME_US 650
+#define DEBOUNCE_TIME_US 1000
 
 typedef enum {
     KEY_IDLE,

@@ -10,7 +10,7 @@
 #include "logger.h"
 #include <main.h>
 
-#define UART_RX_BUFFER_SIZE 256
+#define UART_RX_BUFFER_SIZE 128
 #define UART_TX_BUFFER_SIZE 128
 #define UART_RX_BUFFER_MASK (UART_RX_BUFFER_SIZE - 1)
 #define UART_TX_BUFFER_MASK (UART_TX_BUFFER_SIZE - 1)

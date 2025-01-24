@@ -38,7 +38,6 @@ extern uint8_t USBD_HID_SendReport(USBD_HandleTypeDef  *pdev,
 	                                   uint8_t *report,
 	                                   uint16_t len);
 
-void checkConnection(void);
 
 // Time-related functions
 void delay_us(uint32_t us)
@@ -72,7 +71,7 @@ uint32_t elapsedTime(uint32_t start_time)
 
 
 // Bluetooth-related functions
-static void resetRNBD350(bool state)
+void resetRNBD350(bool state)
 {
     if (state) {
     	RNBD.gpio.reset_port->ODR &= ~RNBD.gpio.reset_pin ;
@@ -88,7 +87,7 @@ static void resetRNBD350(bool state)
 }
 
 
-static void RxIndicate(bool value)
+void RxIndicate(bool value)
 {
 	if (value) {
 		RNBD.gpio.wakeup_port->ODR |= RNBD.gpio.wakeup_pin ;
@@ -104,13 +103,7 @@ static void RxIndicate(bool value)
 }
 
 
-static void setBLEMode(RNBD_sys_modes_t mode)
-{
-	LOG_DEBUG("FAULT DETECTED FUNCT PTR BUG");
-}
-
-
-static void initBLEhardware()
+void initBLEhardware()
 {
     RNBD.gpio.reset_pin 	=	 BT_RESET_Pin;
 	RNBD.gpio.reset_port 	=	 BT_RESET_GPIO_Port;
@@ -122,8 +115,7 @@ static void initBLEhardware()
 	RNBD.gpio.status2_port 	=	 BLE_STAT2_GPIO_Port;
 }
 
-
-static void setBLECallbacks(void)
+void setBLECallbacks(void)
 {
 	RNBD.callback.delayMs = HAL_Delay;
 	RNBD.callback.read = uart_read;
@@ -133,13 +125,12 @@ static void setBLECallbacks(void)
 	RNBD.callback.resetModule = resetRNBD350;
 	RNBD.callback.asyncHandler = asyncMessageHandler;
 	RNBD.callback.rxIndicate = RxIndicate;
-	RNBD.callback.systemModeset = setBLEMode;
 	RNBD.callback.getConnStatus = RNBD_isConnected;
 	RNBD.callback.nonBlockDelayMs = non_blocking_delay_ms;
 }
 
 
-static void setDevice_descriptor(void)
+void setDevice_descriptor(void)
 {
 	RNBD.device.vendorName = (const uint8_t *)"Yolk-Workshop";
 	RNBD.device.productName = (const uint8_t *)"Yolk-Keyboard";
@@ -214,24 +205,15 @@ void initBluetooth(void)
 				LOG_DEBUG("BLE Service Changed");
 			}
 
-
-
 			RNBD.callback.resetModule(true);
 			RNBD.callback.delayMs(RNBD_RESET_DELAY_TIME);
 			RNBD.callback.resetModule(false);
 			RNBD.callback.delayMs(RNBD_STARTUP_DELAY);
 
-
 			while (RNBD.callback.dataReady()) RNBD.callback.read();
 			LOG_INFO("RNBD3350 reboot successful, command mode entered");
 
-
 			GATT_List_Services();
-			//if(RNBD_SetServiceBitmap(0xC0)){
-				//Verify the change
-			//	RNBD_ServiceChangeIndicator();
-			//}
-
 			RNBD_EnableAdvertising();
 
             //RNBD_EnterDataMode();
@@ -322,22 +304,18 @@ void sendBLEReport(void)
     // Only send if report has changed
     if (memcmp(&kb_state.current_report, &last_report, sizeof(hid_report_t)) != 0) {
 
-        ble_report.report_id = 1;
-        memcpy(&ble_report.report, &kb_state.current_report, sizeof(hid_report_t));
-
-        if (GATT_sendHIDReport((uint8_t*)&ble_report, sizeof(ble_hid_report_t))) {
+        if (GATT_sendHIDReport((uint8_t*)&kb_state.current_report, sizeof(ble_hid_report_t))) {
             // Update timing and save last report
             kb_state.last_report.ble_last_report = current_time;
             memcpy(&last_report, &kb_state.current_report, sizeof(hid_report_t));
             clearReport();
-            LOG_DEBUG("BLE Report Successful");
+            //LOG_DEBUG("BLE Report Successful");
         } else {
             LOG_DEBUG("BLE Report Failed");
         }
     }
-    LOG_DEBUG("BLE Report Exit");
+    //LOG_DEBUG("BLE Report Exit");
 }
-
 
 void checkConnection()
 {
@@ -413,7 +391,6 @@ void checkBLEconnection(void)
     }
     prev_status = status_changed;
 }
-
 
 
 void reportArbiter(void)

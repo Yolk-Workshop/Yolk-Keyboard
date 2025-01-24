@@ -76,7 +76,7 @@ int main(void)
     /* Initialize USB and Bluetooth */
     MX_USB_DEVICE_Init();
 
-    kb_state.connection_mode = CONNECTION_BLE; //XXX Feature Under Test
+    kb_state.connection_mode = CONNECTION_USB; //XXX Feature Under Test
     if(kb_state.connection_mode) {
         initBluetooth();
     }

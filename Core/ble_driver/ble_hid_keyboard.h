@@ -8,11 +8,11 @@
 #ifndef BLE_DRIVER_BLE_HID_KEYBOARD_H_
 #define BLE_DRIVER_BLE_HID_KEYBOARD_H_
 
-#include "../keyboard_driver/keys.h"
+#include "keys.h"
 
 //Service UUID
 #define DEVICE_INFO_UUID			"180A"
-#define HID_SERVICE_UUID 			"1812"
+#define HID_SERVICE_UUID 			"66d3bedf29d2419ba720a70392bde196"
 #define BATTERY_SERVICE_UUID		"180F"
 #define SCAN_PARAMS_SERVICE_UUID    "1813"
 
