@@ -14,6 +14,7 @@
 #include "main.h"
 #include "keys.h"
 #include "keycodes.h"
+#include "backlight_driver.h"
 
 /* USB includes */
 #include "usbd_def.h"
