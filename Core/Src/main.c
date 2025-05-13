@@ -18,6 +18,7 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM2_Init(void);
 static void Init_TIM3(void);
 static void Init_TIM21(void);
+static void initWatchdog(void);
 
 /* Private variables --------------------------------------------------------*/
 // Global state flags
@@ -25,6 +26,8 @@ volatile uint8_t scan_flag = 0;
 volatile uint8_t report_ready_flag = 0;
 volatile ITStatus uart2_tc_flag = SET;
 volatile ITStatus sys_ready = RESET;
+volatile ITStatus pmsm_update_flag = SET;
+volatile uint8_t startup_complete = 0;
 
 // Hardware interface handlers
 TIM_HandleTypeDef htim2; //Haptic
@@ -39,12 +42,11 @@ DMA_HandleTypeDef hdma_lpuart1_rx;
 DMA_HandleTypeDef hdma_lpuart1_tx;
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
-extern uint8_t dma_rx_buffer[RX_BUFFER_SIZE];
+extern uint8_t dma_rx_buffer[128];
+extern volatile connection_mode_t g_connection_mode;
 
-static log_buffer_t log_queue =
-{ 0 };
+static log_buffer_t log_queue = { 0 };
 void logger_output(const char *message);
-
 
 /**
  * @brief  The application entry point.
@@ -63,31 +65,12 @@ int main(void)
 	LOG_INFO("System Reset");
 	LOG_INFO("Core System Hardware Initialised");
 
-	initI2C1();
-	if (!scan_I2C_bus())
-	{
-		Error_Handler();
-	}
 	MX_I2C2_Init();
 	LOG_INFO("I2C Peripheral Initialised");
 
 	/* Initialize Keyboard Hardware */
 	initKeyboard();
 	resetRows();
-	if (!init_backlight())
-	{
-		Error_Handler();
-	}
-	LOG_INFO("Keyboard Hardware Initialised");
-
-	/* Initialize USB and Bluetooth */
-	MX_USB_DEVICE_Init();
-
-	kb_state.connection_mode = CONNECTION_USB; //XXX Feature Under Test
-	if (kb_state.connection_mode)
-	{
-		initBluetooth();
-	}
 
 	/* Initialize Timers */
 	MX_TIM2_Init();
@@ -102,10 +85,20 @@ int main(void)
 
 	HAL_TIM_Base_Start_IT(&htim3);
 	LOG_DEBUG("Timer 3 Interrupt Started");
-	LOG_INFO("System ready and running");
 
-	sys_ready = RESET;
-	//HAL_Delay(100);
+	PM_Init();
+	/* Initialize USB and Bluetooth */
+	if (g_connection_mode) {
+		initBluetooth();
+	}
+	else {
+		MX_USB_DEVICE_Init();
+		kb_state.connection_mode = g_connection_mode;
+	}
+
+	initWatchdog();
+	startup_complete = 1;
+	LOG_INFO("System ready and running");
 
 	/* Main loop */
 	while (1)
@@ -124,32 +117,32 @@ int main(void)
 			scan_flag = 0;
 			__set_PRIMASK(primask);
 		}
+		// Update power management state
+		PM_Update();
 
-		if (ble_conn_flag == SET)
-		{
-			checkBLEconnection();
-		}
+		#ifdef DEBUG_POWER
+			// Debug power management every 5 seconds
+			static uint32_t last_debug_print = 0;
+			if (HAL_GetTick() - last_debug_print > 5000) {
+				LOG_INFO("PM state: %s, Events: %d",
+						 current_pm_state == PM_STATE_ACTIVE ? "ACTIVE" : "SLEEP",
+						 dbg_pm_events);
+				last_debug_print = HAL_GetTick();
+			}
+		#endif
 
-		if ((RNBD.async.msg_in_progress == RESET)
-				&& (strlen(RNBD.async.async_buffer) > 0))
-		{
-
-			if (sys_ready)
-				sys_ready = RESET;
-
-			RNBD.callback.asyncHandler((char*) RNBD.async.async_buffer);
-
-			if (RNBD.gatt.mode)
-			{
-				RNBD.callback.delayMs(7);
-				RNBD.gatt.events.gatt_configure_hid();
-			};
-
-			memset(RNBD.async.async_buffer, 0, sizeof(RNBD.async.async_buffer));
-		}
 	}
+
 }
 
+static void initWatchdog(void)
+{
+    // Disable watchdog during debugging sessions
+    WDG_DisableInDebug();
+    // Initialize watchdog with 4-second timeout
+    WDG_Init(WDG_TIMEOUT);
+    LOG_INFO("Watchdog initialized with %d second timeout", WDG_TIMEOUT/1000);
+}
 
 /**
  * @brief System Clock Configuration
@@ -316,7 +309,7 @@ void MX_LPUART1_UART_Init(void)
 	}
 
 	/* Enable DMA for UART RX */
-	if (HAL_UART_Receive_DMA(&hlpuart1, dma_rx_buffer, RX_BUFFER_SIZE)
+	if (HAL_UART_Receive_DMA(&hlpuart1, dma_rx_buffer, 128)
 			!= HAL_OK)
 	{
 		Error_Handler();
@@ -403,88 +396,36 @@ static void MX_GPIO_Init(void)
 	__HAL_RCC_GPIOB_CLK_ENABLE();
 	__HAL_RCC_GPIOD_CLK_ENABLE();
 
-	/* Configure Output Levels */
+	/* Configure Default Output Levels */
 	HAL_GPIO_WritePin(LMAT_RESET_GPIO_Port, LMAT_RESET_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(LMAT_SDB_GPIO_Port, LMAT_SDB_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(GPIOC, UART_MODE_SW_Pin | EEPROM_WC_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(GPIOC, BT_RESET_Pin, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(GPIOC,
+	UART_MODE_SW_Pin | EEPROM_WC_Pin | BATT_CHRG_EN_Pin, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(GPIOC, BT_RESET_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(GPIOD,
 	R0_Pin | R1_Pin | R2_Pin | R3_Pin | R4_Pin | R5_Pin, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(HAPTIC_PWM_EN_GPIO_Port,
+	HAPTIC_PWM_EN_Pin | HAPTIC_EN_PWM_Pin, GPIO_PIN_RESET);
 
-	/* Configure Column Pins */
-	GPIO_InitStruct.Pin = C10_Pin | C11_Pin | C12_Pin | C13_Pin | C8_Pin
-			| C9_Pin;
+	/* Configure Column Pins (C8-C13) on GPIOE */
+	GPIO_InitStruct.Pin = C8_Pin | C9_Pin | C10_Pin | C11_Pin | C12_Pin
+			| C13_Pin;
 	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
 	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
 	HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-	/* Configure Interrupt Pins */
-	GPIO_InitStruct.Pin = TOUCH_INT_Pin | BMS_ALERT_Pin | LMAT_INT_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-	/* Configure Control Pins */
-	GPIO_InitStruct.Pin = LMAT_RESET_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(LMAT_RESET_GPIO_Port, &GPIO_InitStruct);
-
-	/* Configure Bluetooth Status Pins */
-	GPIO_InitStruct.Pin = BLE_STAT1_Pin | BLE_STAT2_Pin | BT_SIGNAL_GOOD_Pin;
+	/* Configure Column Pin C0 on GPIOD */
+	GPIO_InitStruct.Pin = C0_Pin;
 	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+	HAL_GPIO_Init(C0_GPIO_Port, &GPIO_InitStruct);
+
+	/* Configure Column Pins (C1-C7) on GPIOB */
+	GPIO_InitStruct.Pin = C1_Pin | C2_Pin | C3_Pin | C4_Pin | C5_Pin | C6_Pin
+			| C7_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
 	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-	/* Configure USB and Proximity Pins */
-	GPIO_InitStruct.Pin = VBUS_DETECT_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-	GPIO_InitStruct.Pin = PROX_SENSE_INT_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-	/*Configure GPIO pin : LMAT_SDB_Pin */
-	GPIO_InitStruct.Pin = LMAT_SDB_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(LMAT_SDB_GPIO_Port, &GPIO_InitStruct);
-
-	/*Configure GPIO pins : UART_MODE_SW_Pin EEPROM_WC_Pin */
-	GPIO_InitStruct.Pin = UART_MODE_SW_Pin | EEPROM_WC_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-	GPIO_InitStruct.Pin = BT_RESET_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
-	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-	GPIO_InitStruct.Pin = BT_RX_INPUT_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-	/*Configure GPIO pins : BT_RX_INPUT_Pin AMB_I2C_INT_Pin BT_RESET_Pin BT_TX_ALERT_Pin */
-	GPIO_InitStruct.Pin = AMB_I2C_INT_Pin | BT_TX_ALERT_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-	/*Configure GPIO pin : BT_PAIR_SW_Pin */
-	GPIO_InitStruct.Pin = BT_PAIR_SW_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-	GPIO_InitStruct.Pull = GPIO_PULLUP;
-	HAL_GPIO_Init(BT_PAIR_SW_GPIO_Port, &GPIO_InitStruct);
 
 	/* Configure Row Output Pins */
 	GPIO_InitStruct.Pin = R0_Pin | R1_Pin | R2_Pin | R3_Pin | R4_Pin | R5_Pin;
@@ -493,17 +434,96 @@ static void MX_GPIO_Init(void)
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
 	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-	/* Configure Additional Column Input Pins */
-	GPIO_InitStruct.Pin = C0_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-	HAL_GPIO_Init(C0_GPIO_Port, &GPIO_InitStruct);
+	/* Configure Interrupt Pins on GPIOA */
+	GPIO_InitStruct.Pin = TOUCH_INT_Pin | BMS_ALERT_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-	GPIO_InitStruct.Pin = C1_Pin | C2_Pin | C3_Pin | C4_Pin | C5_Pin | C6_Pin
-			| C7_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	/* Configure Proximity Sensor Interrupt */
+	GPIO_InitStruct.Pin = PROX_SENSE_INT_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(PROX_SENSE_INT_GPIO_Port, &GPIO_InitStruct);
+
+	/* Configure Version Detection Pins for ADC input */
+	GPIO_InitStruct.Pin = HAPTIC_BRD_VERSION_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(HAPTIC_BRD_VERSION_Port, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin = KB_BRD_VERSION_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(KB_BRD_VERSION_Port, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin = PS_BRD_VERSION_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(PS_BRD_VERSION_Port, &GPIO_InitStruct);
+
+	/* Configure LMAT Control Pins */
+	GPIO_InitStruct.Pin = LMAT_RESET_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(LMAT_RESET_GPIO_Port, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin = LMAT_SDB_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
 	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(LMAT_SDB_GPIO_Port, &GPIO_InitStruct);
+
+	/* Configure Bluetooth Status Pins */
+	GPIO_InitStruct.Pin = BLE_STAT1_Pin | BLE_STAT2_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	/* Configure Battery Management Pins */
+	GPIO_InitStruct.Pin = BATT_PG_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(BATT_PG_GPIO_Port, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin = BATT_STAT_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(BATT_STAT_Port, &GPIO_InitStruct);
+
+	GPIO_InitStruct.Pin = BATT_CHRG_EN_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(BATT_CHRG_EN_GPIO_Port, &GPIO_InitStruct);
+
+	/* Configure USB Detection Pin */
+	GPIO_InitStruct.Pin = VBUS_DETECT_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_PULLUP;
+	HAL_GPIO_Init(VBUS_DETECT_GPIO_Port, &GPIO_InitStruct);
+
+	/* Configure UART and EEPROM Control Pins */
+	GPIO_InitStruct.Pin = UART_MODE_SW_Pin | EEPROM_WC_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+	/* Configure Bluetooth Control Pins */
+	GPIO_InitStruct.Pin = BT_RESET_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(BT_RESET_GPIO_Port, &GPIO_InitStruct);
+
+	/* Configure Haptic Feedback Control Pins */
+	GPIO_InitStruct.Pin = HAPTIC_PWM_EN_Pin | HAPTIC_EN_PWM_Pin;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(HAPTIC_PWM_EN_GPIO_Port, &GPIO_InitStruct);
 
 	/* Configure Keystroke Polling Signal Pin */
 	GPIO_InitStruct.Pin = GPIO_PIN_12;
@@ -512,9 +532,56 @@ static void MX_GPIO_Init(void)
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-	/* Configure EXTI Interrupt */
-	NVIC_SetPriority(EXTI4_15_IRQn, 5);
+	/* Configure EXTI Interrupt Controller */
+	NVIC_SetPriority(EXTI0_1_IRQn, 5); /* For TOUCH_INT_Pin (PA0) */
+	NVIC_EnableIRQ(EXTI0_1_IRQn);
+
+	NVIC_SetPriority(EXTI4_15_IRQn, 5); /* For BMS_ALERT_Pin (PA4) and PROX_SENSE_INT_Pin (PD9) */
 	NVIC_EnableIRQ(EXTI4_15_IRQn);
+
+	/* Set all unused pins to analog mode to reduce power consumption */
+	/* GPIOA unused pins - excluding USB pins, ADC pins, and interrupt pins */
+	GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_6 |
+	GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_15;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	/* GPIOB unused pins - excluding I2C, BLE status, battery pins */
+	GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_2 |
+	GPIO_PIN_12 /* Excluding PIN_12 used for keystroke polling */|
+	GPIO_PIN_0 /* Already used for PS_BRD_VERSION */;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	/* GPIOC unused pins - excluding BT reset, UART mode, EEPROM, battery pins */
+	GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 |
+	GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_7 | GPIO_PIN_12 |
+	GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+	/* GPIOD unused pins - excluding row pins, column pins, LMAT pins, VBUS detect, prox sense */
+	GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_12 | GPIO_PIN_13 |
+	GPIO_PIN_14 | GPIO_PIN_15;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+	/* GPIOE unused pins - excluding column pins, haptic pins */
+	GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_11 |
+	GPIO_PIN_12 | GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+	/* GPIOH unused pins - set all to analog */
+	GPIO_InitStruct.Pin = GPIO_PIN_All;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
 }
 
 void logger_output(const char *message)

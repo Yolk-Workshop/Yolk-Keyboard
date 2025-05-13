@@ -19,10 +19,9 @@ extern "C" {
 #include "kb_driver.h"
 #include "keys.h"
 #include "keycodes.h"
-#include "rnbd_interface.h"
-#include "rnbd.h"
 #include "i2c_core.h"
-#include "backlight_driver.h"
+#include "watchdog.h"
+#include "pmsm.h"
 
 #include "logger.h"
 #include "usb_device.h"
@@ -47,7 +46,6 @@ extern I2C_HandleTypeDef hi2c2;
 
 /* Keyboard State */
 extern keyboard_state_t kb_state;
-extern rnbd_interface_t RNBD;
 
 /* Exported Constants ------------------------------------------------------*/
 /* Matrix Dimensions */
@@ -127,46 +125,70 @@ extern const uint16_t col_pins[KEY_COLS];
 /* Bluetooth Related Pins */
 #define BT_RESET_Pin        GPIO_PIN_11
 #define BT_RESET_GPIO_Port  GPIOC
-#define BT_RX_INPUT_Pin     GPIO_PIN_7
-#define BT_RX_INPUT_GPIO_Port GPIOC
-#define BT_TX_ALERT_Pin     GPIO_PIN_12
-#define BT_TX_ALERT_GPIO_Port GPIOC
-#define BT_PAIR_SW_Pin      GPIO_PIN_10
-#define BT_PAIR_SW_GPIO_Port GPIOC
 #define BLE_STAT1_Pin       GPIO_PIN_13
 #define BLE_STAT1_GPIO_Port GPIOB
 #define BLE_STAT2_Pin       GPIO_PIN_14
 #define BLE_STAT2_GPIO_Port GPIOB
-#define BT_SIGNAL_GOOD_Pin  GPIO_PIN_15
-#define BT_SIGNAL_GOOD_GPIO_Port GPIOB
+
+/* Battery Management Pins */
+#define BATT_CHRG_EN_Pin      GPIO_PIN_10
+#define BATT_CHRG_EN_GPIO_Port GPIOC
+#define BATT_PG_Pin          GPIO_PIN_15
+#define BATT_PG_GPIO_Port    GPIOB
+#define BATT_STAT_Pin        GPIO_PIN_9
+#define BATT_STAT_Port       GPIOC
+#define BMS_ALERT_Pin        GPIO_PIN_4
+#define BMS_ALERT_GPIO_Port  GPIOA
 
 /* USB Related Pins */
 #define VBUS_DETECT_Pin     GPIO_PIN_8
 #define VBUS_DETECT_GPIO_Port GPIOD
+#define USB_DM_Pin          GPIO_PIN_11
+#define USB_DM_GPIO_Port    GPIOA
+#define USB_DP_Pin          GPIO_PIN_12
+#define USB_DP_GPIO_Port    GPIOA
+
+/* Board Version Detection Pins */
+#define HAPTIC_BRD_VERSION_Pin GPIO_PIN_5
+#define HAPTIC_BRD_VERSION_Port GPIOA
+#define KB_BRD_VERSION_Pin     GPIO_PIN_7
+#define KB_BRD_VERSION_Port    GPIOA
+#define PS_BRD_VERSION_Pin     GPIO_PIN_0
+#define PS_BRD_VERSION_Port    GPIOB
+
+/* Haptic Feedback Pins */
+#define HAPTIC_PWM_EN_Pin     GPIO_PIN_9
+#define HAPTIC_PWM_EN_GPIO_Port GPIOE
+#define HAPTIC_EN_PWM_Pin     GPIO_PIN_10
+#define HAPTIC_EN_PWM_GPIO_Port GPIOE
+
+/* LMAT and Touch Pins */
+#define LMAT_SDB_Pin        GPIO_PIN_10
+#define LMAT_SDB_GPIO_Port  GPIOD
+#define LMAT_RESET_Pin      GPIO_PIN_0
+#define LMAT_RESET_GPIO_Port GPIOD
+#define TOUCH_INT_Pin       GPIO_PIN_0
+#define TOUCH_INT_GPIO_Port GPIOA
+
+/* Proximity Sensor Pin */
+#define PROX_SENSE_INT_Pin  GPIO_PIN_9
+#define PROX_SENSE_INT_GPIO_Port GPIOD
 
 /* Other Control Pins */
 #define UART_MODE_SW_Pin    GPIO_PIN_6
 #define UART_MODE_SW_GPIO_Port GPIOC
 #define EEPROM_WC_Pin       GPIO_PIN_8
 #define EEPROM_WC_GPIO_Port GPIOC
-#define PROX_SENSE_INT_Pin GPIO_PIN_9
-#define PROX_SENSE_INT_GPIO_Port GPIOD
-#define LMAT_SDB_Pin GPIO_PIN_10
-#define LMAT_SDB_GPIO_Port GPIOD
-#define TOUCH_INT_Pin GPIO_PIN_0
-#define TOUCH_INT_GPIO_Port GPIOA
-#define BMS_ALERT_Pin GPIO_PIN_4
-#define BMS_ALERT_GPIO_Port GPIOA
-#define LMAT_RESET_Pin GPIO_PIN_5
-#define LMAT_RESET_GPIO_Port GPIOA
-#define LMAT_INT_Pin GPIO_PIN_7
-#define LMAT_INT_GPIO_Port GPIOA
-#define HAPTIC_PWM_EN_Pin GPIO_PIN_9
-#define HAPTIC_PWM_EN_GPIO_Port GPIOE
-#define HAPTIC_EN_PWM_Pin GPIO_PIN_10
-#define HAPTIC_EN_PWM_GPIO_Port GPIOE
-#define AMB_I2C_INT_Pin GPIO_PIN_9
-#define AMB_I2C_INT_GPIO_Port GPIOC
+
+/* I2C Pins */
+#define I2C1_SCL_Pin        GPIO_PIN_8
+#define I2C1_SCL_GPIO_Port  GPIOB
+#define I2C1_SDA_Pin        GPIO_PIN_9
+#define I2C1_SDA_GPIO_Port  GPIOB
+#define I2C2_SCL_Pin        GPIO_PIN_10
+#define I2C2_SCL_GPIO_Port  GPIOB
+#define I2C2_SDA_Pin        GPIO_PIN_11
+#define I2C2_SDA_GPIO_Port  GPIOB
 
 #ifdef __cplusplus
 }

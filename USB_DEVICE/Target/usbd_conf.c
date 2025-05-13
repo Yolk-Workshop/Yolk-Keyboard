@@ -24,6 +24,7 @@
 #include "usbd_def.h"
 #include "usbd_core.h"
 #include "usbd_hid.h"
+#include "pmsm.h"
 
 /* USER CODE BEGIN Includes */
 
@@ -199,6 +200,7 @@ void HAL_PCD_SuspendCallback(PCD_HandleTypeDef *hpcd)
   USBD_LL_Suspend((USBD_HandleTypeDef*)hpcd->pData);
   /* Enter in STOP mode. */
   /* USER CODE BEGIN 2 */
+  //PM_HandleUSBSuspend();
   if (hpcd->Init.low_power_enable)
   {
     /* Set SLEEPDEEP bit and SleepOnExit of Cortex System Control Register. */
@@ -220,6 +222,7 @@ void HAL_PCD_ResumeCallback(PCD_HandleTypeDef *hpcd)
 #endif /* USE_HAL_PCD_REGISTER_CALLBACKS */
 {
   /* USER CODE BEGIN 3 */
+  //PM_HandleUSBResume();
   if (hpcd->Init.low_power_enable)
   {
     /* Reset SLEEPDEEP bit of Cortex System Control Register. */
@@ -336,7 +339,9 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
   HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData , 0x80 , PCD_SNG_BUF, 0x58);
   /* USER CODE END EndPoint_Configuration */
   /* USER CODE BEGIN EndPoint_Configuration_HID */
-  HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData , 0x81 , PCD_SNG_BUF, 0x100);
+  HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData, 0x81, PCD_SNG_BUF, 0x80);  // Boot Keyboard
+  HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData, 0x82, PCD_SNG_BUF, 0xC0);  // NKRO Keyboard
+  HAL_PCDEx_PMAConfig((PCD_HandleTypeDef*)pdev->pData, 0x83, PCD_SNG_BUF, 0xE0);
   /* USER CODE END EndPoint_Configuration_HID */
   return USBD_OK;
 }

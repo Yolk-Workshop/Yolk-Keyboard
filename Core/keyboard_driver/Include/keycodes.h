@@ -10,6 +10,18 @@
 #ifndef KEYBOARD_DRIVER_KEYCODES_H_
 #define KEYBOARD_DRIVER_KEYCODES_H_
 
+#define CONSUMER_NEXT_TRACK_BIT    0  // First usage in descriptor (0xB5)
+#define CONSUMER_PREV_TRACK_BIT    1  // Second usage in descriptor (0xB6)
+#define CONSUMER_PLAY_PAUSE_BIT    2  // Third usage in descriptor (0xCD)
+#define CONSUMER_VOL_UP_BIT        4  // Fifth usage in descriptor (0xE9)
+#define CONSUMER_VOL_DOWN_BIT      5  // Sixth usage in descriptor (0xEA)
+#define CONSUMER_STOP_BIT          6  // Seventh usage in descriptor (0xB7)
+#define KC_FASTFORWARD    0xA8    // Fast Forward
+#define KC_RECORD         0xAA    // Record
+#define KC_EJECTCD        0xAB    // Eject
+#define KC_CALCULATOR     0xAC    // Calculator
+#define KC_REWIND         0xA9    // Rewind
+
 typedef enum {
     // Reserved (0x00-0x03)
     KC_NO = 0x00,           // No event indicated
@@ -142,7 +154,7 @@ typedef enum {
 
 // Custom keycodes start after USB HID range
 typedef enum {
-    CUSTOM_KEY_START = 0x100,     // Start of custom keycodes
+    CUSTOM_KEY_START = 0x82,     // Start of custom keycodes
 
     // Custom Function Layer Keys
     KC_FN = CUSTOM_KEY_START,     // Function modifier

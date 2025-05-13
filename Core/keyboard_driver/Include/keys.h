@@ -15,13 +15,13 @@
 // Matrix dimensions
 #define KEY_ROWS 6
 #define KEY_COLS 14
-#define KEY_LAYERS 4
+#define KEY_LAYERS 3
 
 // NKRO Report Size
 #define NKRO_SIZE 6
 #define NKRO_EXT_SIZE 8
 
-#define DEBOUNCE_TIME_US 1000
+#define DEBOUNCE_TIME_US 300000
 
 typedef enum {
     KEY_IDLE,
@@ -32,17 +32,31 @@ typedef enum {
 } keystate_t;
 
 
+// Boot protocol keyboard report (Interface 0)
 typedef struct {
-    uint8_t modifiers;
+    uint8_t modifiers;      // Modifier keys
     uint8_t reserved;
-    uint8_t keys[NKRO_SIZE];
-    uint8_t ext_key[NKRO_EXT_SIZE];
-} hid_report_t;
+    uint8_t keys[6];        // 6KRO for boot protocol
+} __attribute__((packed)) boot_keyboard_report_t;
+
+// NKRO keyboard report (Interface 1)
+typedef struct {
+    uint8_t modifiers;      // Modifier keys
+    uint8_t reserved;
+    uint8_t bitmap[10];     // Key bitmap for NKRO
+} __attribute__((packed)) nkro_keyboard_report_t;
+
+
+// Consumer Control report (Interface 2)
+typedef struct {
+    uint8_t buttons[2];        // Media key bitmap
+} __attribute__((packed)) consumer_report_t;
 
 typedef struct {
     uint8_t report_id;   // BLE-specific report ID
-    hid_report_t report;  // The actual NKRO report data
-} ble_hid_report_t;
+    boot_keyboard_report_t boot;  // The boot protocol report
+    //nkro_keyboard_report_t boot
+}__attribute__((packed)) ble_hid_report_t;
 
 typedef enum {
 	BASE_LAYER,
@@ -63,7 +77,7 @@ typedef struct {
     uint32_t usb_last_report;
 } last_report_t;
 
-// Keyboard state
+// Updated keyboard state structure
 typedef struct {
     bool fn_pressed;
     bool swap_active;
@@ -72,9 +86,11 @@ typedef struct {
     output_mode_t output_mode;
     uint8_t connection_mode;
     last_report_t last_report;
-    hid_report_t current_report;
+    boot_keyboard_report_t boot_report;     // For boot protocol
+    nkro_keyboard_report_t nkro_report;     // For NKRO
+    consumer_report_t consumer_report;      // For media keys
     uint8_t KRO_mode;
-} keyboard_state_t;
+} __attribute__((packed)) keyboard_state_t;
 
 
 // Layer definition

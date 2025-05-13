@@ -52,7 +52,7 @@ bool checkLEDshortstate(void)
 		}
 
 		// Print the raw register value
-		LOG_DEBUG("CS%2d: 0x%02X", i, short_status[i]);
+		//LOG_DEBUG("CS%2d: 0x%02X", i, short_status[i]);
 
 		// Update matrix state for this CS line
 		for (uint8_t j = 0; j < 12; j++)
@@ -66,6 +66,7 @@ bool checkLEDshortstate(void)
 			}
 		}
 	}
+	LOG_DEBUG("No Short detected");
 
 	return status;
 }
@@ -109,14 +110,14 @@ bool init_backlight(void)
 	}
 
 	// Set initial brightness
-	bl_state.gcc_value = MAX_GCC;
+	bl_state.gcc_value = 0xFF;
 	if (!setGlobalCurrent(bl_state.gcc_value))
 	{
 		LOG_ERROR("Failed to set initial brightness");
 		return false;
 	}
 
-	setAllLEDsPWM(MAX_PWM);
+	setAllLEDsPWM(0xFF);
 
 	return true;
 }

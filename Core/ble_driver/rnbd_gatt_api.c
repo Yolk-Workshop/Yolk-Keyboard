@@ -221,7 +221,7 @@ static bool GATT_InitHIDService(void) {
         (uint8_t*)HID_REPORT_UUID,
         4,
         PROPERTY_READ | PROPERTY_NOTIFY,
-        sizeof(hid_report_t)
+        sizeof(boot_keyboard_report_t)
     );
 
     current_handle += 2;

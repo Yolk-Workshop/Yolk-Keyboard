@@ -17,9 +17,10 @@ extern i2c_device i2c1_inst;
 #define INT_STATUS_REG 0xF1
 
 // LED Control Register Addresses
-#define MAX_PWM 0xFF
-#define MIN_PWM 0x00
-#define MAX_GCC 0xFF
+#define MAX_PWM 255U
+
+#define MIN_PWM 0U
+#define MAX_GCC 255U
 #define MID_GCC 127U
 
 // Configuration Register Macros

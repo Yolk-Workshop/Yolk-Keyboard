@@ -59,7 +59,7 @@ void rx_irq_handler(void) {
     __disable_irq();
     ATOMIC_CLEAR_BIT(hlpuart1.Instance->CR1, USART_CR1_IDLEIE);
 
-    RNBD.async.msg_in_progress = false;
+    //RNBD.async.msg_in_progress = false;
     uint16_t dma_count = __HAL_DMA_GET_COUNTER(&hdma_lpuart1_rx);
     uint16_t bytes_received = UART_RX_BUFFER_SIZE - dma_count;
 
@@ -74,6 +74,7 @@ void rx_irq_handler(void) {
             uart_rx_head = next_head;
             uart_rx_count++;
 
+            /*
             // Handle async messages
             if (rx_byte == '%') {
                 if (!RNBD.async.msg_in_progress) {
@@ -97,6 +98,7 @@ void rx_irq_handler(void) {
                     *RNBD.async.async_pHead++ = rx_byte;
                 }
             }
+            */
         }
         else {
             LOG_WARNING("RX Buffer overflow");

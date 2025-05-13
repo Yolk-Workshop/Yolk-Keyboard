@@ -3278,7 +3278,7 @@ typedef struct
 #define I2C_ISR_ALERT                I2C_ISR_ALERT_Msk                         /*!< SMBus alert */
 #define I2C_ISR_BUSY_Pos             (15U)    
 #define I2C_ISR_BUSY_Msk             (0x1UL << I2C_ISR_BUSY_Pos)                /*!< 0x00008000 */
-#define I2C_ISR_BUSY                 I2C_ISR_BUSY_Msk                          /*!< Bus busy */
+#define I2C_ISR_BUSY                 I2C_ISR_BUSY_Msk                          /*!IWDG< Bus busy */
 #define I2C_ISR_DIR_Pos              (16U)    
 #define I2C_ISR_DIR_Msk              (0x1UL << I2C_ISR_DIR_Pos)                 /*!< 0x00010000 */
 #define I2C_ISR_DIR                  I2C_ISR_DIR_Msk                           /*!< Transfer direction (slave mode) */

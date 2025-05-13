@@ -1,13 +1,12 @@
 /*
- * helper.h
+ * kb_driver.h
  *
- *  Created on: Jan 7, 2025
- *      Author: bettysidepiece
+ * Created on: Jan 7, 2025
+ * Author: bettysidepiece
  */
 
 #ifndef KEYBOARD_DRIVER_KB_DRIVER_H_
 #define KEYBOARD_DRIVER_KB_DRIVER_H_
-
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -24,17 +23,11 @@
 #define BLE_DEFAULT_TIMER 2000UL
 #define BLE_ALTERED_TIMER 7500UL
 
-//Connection mode
-typedef enum {
-    CONNECTION_USB = 0,
-    CONNECTION_BLE = 1,
-} connection_mode_t;
 
 // Time-related functions
 void delay_us(uint32_t us);
 uint32_t getMicroseconds(void);
 uint32_t elapsedTime(uint32_t start_time);
-
 
 // UART helper functions
 bool uart_transmit_ready(void);
@@ -50,7 +43,7 @@ void scanKeyMatrix(void);
 void sendUSBReport(void);
 void sendBLEReport(void);
 void checkConnection(void);
-void checkBLEconnection();
+void checkBLEconnection(void);
 void reportArbiter(void);
 
 /* Matrix pin definitions */
@@ -61,6 +54,6 @@ extern const uint16_t col_pins[KEY_COLS];
 extern volatile uint8_t ble_conn_flag;
 
 // Logging functions
-void logger_output(const char *message);
+void logger_output(const char* message);
 
-#endif /* HELPER_H */
+#endif /* KEYBOARD_DRIVER_KB_DRIVER_H_ */
