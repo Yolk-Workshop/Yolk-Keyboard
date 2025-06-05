@@ -21,7 +21,8 @@
 #define NKRO_SIZE 6
 #define NKRO_EXT_SIZE 8
 
-#define DEBOUNCE_TIME_US 300000
+#define PHANTOM_FILTER_TIME_US 2000
+#define DEBOUNCE_TIME_US 12000
 
 typedef enum {
     KEY_IDLE,
@@ -52,11 +53,23 @@ typedef struct {
     uint8_t buttons[2];        // Media key bitmap
 } __attribute__((packed)) consumer_report_t;
 
+// BLE-specific reports with Report IDs
 typedef struct {
-    uint8_t report_id;   // BLE-specific report ID
-    boot_keyboard_report_t boot;  // The boot protocol report
-    //nkro_keyboard_report_t boot
-}__attribute__((packed)) ble_hid_report_t;
+    uint8_t report_id;    // Report ID = 1
+    uint8_t modifiers;    // Modifier keys
+    uint8_t reserved;     // Reserved byte
+    uint8_t keys[6];      // Key array (6KRO)
+} __attribute__((packed)) ble_keyboard_report_t;
+
+typedef struct {
+    uint8_t report_id;    // Report ID = 2
+    uint8_t usage[2];     // Consumer usage bytes
+} __attribute__((packed)) ble_consumer_report_t;
+
+typedef struct {
+    ble_keyboard_report_t keyboard;   // 8 bytes total
+    ble_consumer_report_t consumer;   // 3 bytes total
+} __attribute__((packed)) ble_hid_report_t;
 
 typedef enum {
 	BASE_LAYER,
@@ -81,6 +94,7 @@ typedef struct {
 typedef struct {
     bool fn_pressed;
     bool swap_active;
+    uint8_t led_status;
     uint8_t key_count;
     uint8_t current_layer;
     output_mode_t output_mode;
@@ -89,6 +103,7 @@ typedef struct {
     boot_keyboard_report_t boot_report;     // For boot protocol
     nkro_keyboard_report_t nkro_report;     // For NKRO
     consumer_report_t consumer_report;      // For media keys
+
     uint8_t KRO_mode;
 } __attribute__((packed)) keyboard_state_t;
 

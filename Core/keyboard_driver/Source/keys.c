@@ -19,6 +19,16 @@ volatile bool g_usb_suspended = false;
 extern volatile uint8_t report_ready_flag;
 keymap_t layers[KEY_LAYERS] = { 0 };
 
+//Add phantom filtering variables
+static uint32_t last_any_key_time = 0;
+static uint8_t last_key_row = 0xFF;
+static uint8_t last_key_col = 0xFF;
+static uint32_t phantom_count = 0;
+static uint32_t valid_key_count = 0;
+
+static uint32_t last_column_time[KEY_COLS] = {0};
+static bool isPhantomKey(uint8_t row, uint8_t col, uint32_t current_time, bool pressed);
+
 // Keymaps
 keymap_t base_keymap = { { KC_ESCAPE, KC_F1, KC_F2, KC_F3, KC_F4, KC_F5, KC_F6,
 		KC_F7, KC_F8, KC_F9, KC_F10, KC_F11, KC_F12, KC_DELETE }, { KC_GRAVE,
@@ -50,6 +60,17 @@ void initKeyboard(void)
 
 	loadKeymap(BASE_LAYER, &base_keymap);
 	loadKeymap(FN_LAYER, &fn_keymap);
+
+	// Initialize phantom filtering
+	last_any_key_time = 0;
+	last_key_row = 0xFF;
+	last_key_col = 0xFF;
+	phantom_count = 0;
+	valid_key_count = 0;
+
+	// Initialize column timing
+	memset(last_column_time, 0, sizeof(last_column_time));
+
 }
 
 void loadKeymap(uint8_t layer, keymap_t *keymap)
@@ -111,6 +132,29 @@ void resetKeyboardState(void)
 {
 	kb_state.fn_pressed = false;
 	kb_state.swap_active = false;
+}
+
+static uint16_t getStdFuncBit(uint8_t keycode)
+{
+    switch (keycode) {
+        case KC_PREV:        return 0x00B6; // Scan Previous Track
+        case KC_NEXT:        return 0x00B5; // Scan Next Track
+        case KC_PLAY:        return 0x00CD; // Play/Pause
+        case KC_MUTE:        return 0x00E2; // Mute
+        case KC_VOLDOWN:     return 0x00EA; // Volume Down
+        case KC_VOLUP:       return 0x00E9; // Volume Up
+        case KC_STOP:        return 0x00B7; // Stop
+        case KC_REWIND:      return 0x00B4; // Rewind
+
+        // Second byte keys
+        case KC_PAUSE:       return 0x00B1; // Pause
+        case KC_FASTFORWARD: return 0x00B3; // Fast Forward
+        case KC_RECORD:      return 0x00B2; // Record
+        case KC_EJECTCD:     return 0x00B8; // Eject
+        case KC_CALCULATOR:  return 0x0192; // Calculator
+
+        default:             return 0;      // No mapping
+    }
 }
 
 uint8_t getFuncBit(uint8_t keycode)
@@ -249,35 +293,54 @@ static void handleInternalFunction(uint8_t keycode)
 
 static void handleFnKey(uint8_t keycode, bool pressed)
 {
-    // Get the appropriate bit for media controls
-    uint8_t button_bit = getFuncBit(keycode);
-    uint8_t button_byte = 0; // Default to first byte
+	extern volatile connection_mode_t g_connection_mode;
 
-    // Handle second byte media keys
-    if (keycode == KC_PAUSE || keycode == KC_FASTFORWARD || keycode == KC_RECORD ||
-        keycode == KC_EJECTCD || keycode == KC_CALCULATOR) {
-        button_byte = 1;
-    }
+	if (g_connection_mode == CONNECTION_BLE) {
+		// BLE mode: Use HID Usage codes
+		uint16_t usage_code = getStdFuncBit(keycode);
 
-    // First handle standard consumer control keys
-    if (button_bit != 0) {
-        if (pressed) {
-            // Clear both bytes first
-            kb_state.consumer_report.buttons[0] = 0;
-            kb_state.consumer_report.buttons[1] = 0;
+		if (usage_code != 0) {  // Valid consumer key
+			if (pressed) {
+				kb_state.consumer_report.buttons[0] = usage_code & 0xFF;
+				kb_state.consumer_report.buttons[1] = (usage_code >> 8) & 0xFF;
+			} else {
+				kb_state.consumer_report.buttons[0] = 0;
+				kb_state.consumer_report.buttons[1] = 0;
+			}
+			report_ready_flag = 1;
+			return;
+		}
+	} else {
+		// Get the appropriate bit for media controls(USB)
+		uint8_t button_bit = getFuncBit(keycode);
+		uint8_t button_byte = 0; // Default to first byte
 
-            // Set the appropriate bit in the correct byte
-            kb_state.consumer_report.buttons[button_byte] |= button_bit;
-        }
-        else {
-            // On key release, clear both bytes
-            kb_state.consumer_report.buttons[0] = 0;
-            kb_state.consumer_report.buttons[1] = 0;
-        }
+		// Handle second byte media keys
+		if (keycode == KC_PAUSE || keycode == KC_FASTFORWARD || keycode == KC_RECORD ||
+			keycode == KC_EJECTCD || keycode == KC_CALCULATOR) {
+			button_byte = 1;
+		}
 
-        report_ready_flag = 1;
-        return;
-    }
+		// First handle standard consumer control keys
+		if (button_bit != 0) {
+			if (pressed) {
+				// Clear both bytes first
+				kb_state.consumer_report.buttons[0] = 0;
+				kb_state.consumer_report.buttons[1] = 0;
+
+				// Set the appropriate bit in the correct byte
+				kb_state.consumer_report.buttons[button_byte] |= button_bit;
+			}
+			else {
+				// On key release, clear both bytes
+				kb_state.consumer_report.buttons[0] = 0;
+				kb_state.consumer_report.buttons[1] = 0;
+			}
+
+			report_ready_flag = 1;
+			return;
+		}
+	}
 
     // Now handle special function keys that are not standard consumer controls
     switch (keycode)
@@ -344,17 +407,47 @@ static void handleFnKey(uint8_t keycode, bool pressed)
     report_ready_flag = 1;
 }
 
+static bool isPhantomKey(uint8_t row, uint8_t col, uint32_t current_time, bool pressed) {
+    // Only keep global rapid key check - column filtering now happens in scanner
+    uint32_t time_since_last = current_time - last_any_key_time;
+
+    if (time_since_last < PHANTOM_FILTER_TIME_US) {
+        // Same key? Allow it (for legitimate repeat/bounce)
+        if (row == last_key_row && col == last_key_col) {
+            return false;  // Same key is OK
+        }
+
+        // Different key too fast - definitely phantom
+        LOG_DEBUG("GLOBAL PHANTOM: R%d C%d %s (%luµs after R%d C%d)",
+                 row, col, pressed ? "PRESS" : "RELEASE",
+                 time_since_last, last_key_row, last_key_col);
+        phantom_count++;
+        return true;
+    }
+
+    return false;
+}
+
 void processKey(uint8_t row, uint8_t col, bool pressed)
 {
 	if (row >= KEY_ROWS || col >= KEY_COLS) return;
 
-	uint8_t keycode = layers[BASE_LAYER][row][col];
-	//LOG_DEBUG("Keycode : 0x%X, Fn keycode : 0x%X", keycode, KC_FN);
+	uint32_t current_time = getMicroseconds();
 
-	if (keycode == KC_FN) {
-		kb_state.fn_pressed = pressed;
-		//LOG_DEBUG("fn state : %d", kb_state.fn_pressed);
+	//Filter phantoms on BOTH press and release
+	if (isPhantomKey(row, col, current_time, pressed)) {
+		return;  // Block phantom press OR release
 	}
+
+	// Record this valid key event (for both press and release)
+	last_any_key_time = current_time;
+	last_key_row = row;
+	last_key_col = col;
+	last_column_time[col] = current_time;
+
+	uint8_t keycode = layers[BASE_LAYER][row][col];
+
+	if (keycode == KC_FN) kb_state.fn_pressed = pressed;
 
 	// Get the keycode from the current layer (which may have changed if FN was pressed/released)
 	uint8_t current_layer = getCurrentLayer();
@@ -387,7 +480,6 @@ keystate_t handleIdle(uint8_t row, uint8_t col, bool col_pressed,
 		uint32_t current_time)
 {
 	if (col_pressed) {
-		//LOG_DEBUG("Key [%u][%u] DEBOUNCED", row, col);
 		last_change_time[row][col] = current_time;
 		return KEY_DEBOUNCE;
 	}

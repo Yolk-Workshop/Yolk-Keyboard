@@ -11,9 +11,13 @@
 #include "stm32l0xx.h"
 #include "watchdog.h"
 #include "usbd_core.h"
+#include "kb_ble_api.h"
+
+extern bm70_handle_t g_bm70;
+extern volatile uint8_t ble_conn_flag;
 
 // Constants for battery check and IWDG feeding
-#define BATTERY_CHECK_PERIOD 60000      // Check battery every minute
+#define BATTERY_CHECK_PERIOD 45000      // Check battery every minute
 #define IWDG_FEED_PERIOD_MS  1500       // Feed IWDG every 1.5 seconds (safety margin for 4s timeout)
 #define LSI_CLOCK_FREQ       40000      // LSI frequency (typical) - matches watchdog.c
 
@@ -34,6 +38,7 @@ extern volatile uint8_t startup_complete;
 extern void resetRows(void);
 extern keyboard_state_t kb_state;
 extern USBD_HandleTypeDef hUsbDeviceFS;
+extern bm70_handle_t g_bm70;
 
 // External row/column definitions from kb_driver.c
 extern const uint16_t row_pins[KEY_ROWS];
@@ -68,41 +73,27 @@ static void PM_ConfigureLPTIM(void) {
     NVIC_EnableIRQ(LPTIM1_IRQn);
 }
 
-// Modified EXTI column functions
-static void EXTI_Columns_Init(void) {
-    // Enable GPIO clocks
-    RCC->IOPENR |= RCC_IOPENR_GPIOBEN   // for PB1–PB7
-                | RCC_IOPENR_GPIOEEN   // for PE8–PE13
-                | RCC_IOPENR_GPIODEN;  // for PD0 (C0_Pin)
+// Modified EXTI row functions
+static void EXTI_Rows_Init(void) {
+    // Enable GPIO clocks and SYSCFG
+    RCC->IOPENR |= RCC_IOPENR_GPIODEN;  // All rows are on GPIOD
+
+    // Enable SYSCFG clock for EXTI configuration
     RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
 
-    // EXTI0–3 (PB0–PB3)
-    SYSCFG->EXTICR[0] = (SYSCFG_EXTICR1_EXTI0_PB |
-                         SYSCFG_EXTICR1_EXTI1_PB |
-                         SYSCFG_EXTICR1_EXTI2_PB |
-                         SYSCFG_EXTICR1_EXTI3_PB);
+    // Clear all EXTI configurations first
+    SYSCFG->EXTICR[0] = 0;
+    SYSCFG->EXTICR[1] = 0;
 
-    // EXTI4–7 (PB4–PB7)
-    SYSCFG->EXTICR[1] = (SYSCFG_EXTICR2_EXTI4_PB |
-                         SYSCFG_EXTICR2_EXTI5_PB |
-                         SYSCFG_EXTICR2_EXTI6_PB |
-                         SYSCFG_EXTICR2_EXTI7_PB);
-
-    // EXTI8–11 (PE8–PE11)
-    SYSCFG->EXTICR[2] = (SYSCFG_EXTICR3_EXTI8_PE |
-                         SYSCFG_EXTICR3_EXTI9_PE |
-                         SYSCFG_EXTICR3_EXTI10_PE |
-                         SYSCFG_EXTICR3_EXTI11_PE);
-
-    // EXTI12–13 (PE12–PE13)
-    SYSCFG->EXTICR[3] = (SYSCFG_EXTICR4_EXTI12_PE |
-                         SYSCFG_EXTICR4_EXTI13_PE);
+    // Configure EXTI lines for each row:
+    SYSCFG->EXTICR[0] |= SYSCFG_EXTICR1_EXTI1_PD | SYSCFG_EXTICR1_EXTI2_PD | SYSCFG_EXTICR1_EXTI3_PD;
+    SYSCFG->EXTICR[1] |= SYSCFG_EXTICR2_EXTI4_PD | SYSCFG_EXTICR2_EXTI5_PD | SYSCFG_EXTICR2_EXTI6_PD;
 }
 
-static inline void EXTI_Columns_Enable(void) {
-    const uint32_t mask = 0x3FFF;  // Lines 0-13
+static inline void EXTI_Rows_Enable(void) {
+    const uint32_t mask = 0x007E;  // Lines 1-6 (binary: 0111 1110)
 
-    // Configure falling edge trigger only for keyboard matrix
+    // Configure falling edge trigger for keyboard matrix
     EXTI->FTSR |= mask;
     EXTI->RTSR &= ~mask;
 
@@ -112,16 +103,17 @@ static inline void EXTI_Columns_Enable(void) {
     // Enable interrupt mask
     EXTI->IMR |= mask;
 
-    NVIC_EnableIRQ(EXTI0_1_IRQn);
-    NVIC_SetPriority(EXTI0_1_IRQn,0);
-    NVIC_EnableIRQ(EXTI2_3_IRQn);
-	NVIC_SetPriority(EXTI2_3_IRQn,0);
-	NVIC_EnableIRQ(EXTI4_15_IRQn );
-	NVIC_SetPriority(EXTI4_15_IRQn ,0);
+    // Enable NVIC interrupts
+    NVIC_EnableIRQ(EXTI0_1_IRQn);    // For EXTI1 (R0)
+    NVIC_SetPriority(EXTI0_1_IRQn, 0);
+    NVIC_EnableIRQ(EXTI2_3_IRQn);    // For EXTI2-3 (R1-R2)
+    NVIC_SetPriority(EXTI2_3_IRQn, 0);
+    NVIC_EnableIRQ(EXTI4_15_IRQn);   // For EXTI4-6 (R3-R5)
+    NVIC_SetPriority(EXTI4_15_IRQn, 0);
 }
 
-static inline void EXTI_Columns_Disable(void) {
-    const uint32_t mask = 0x3FFF;  // Lines 0-13
+static inline void EXTI_Rows_Disable(void) {
+    const uint32_t mask = 0x007E;  // Lines 1-6
 
     // Disable interrupt mask
     EXTI->IMR &= ~mask;
@@ -129,9 +121,65 @@ static inline void EXTI_Columns_Disable(void) {
     // Clear pending flags
     EXTI->PR = mask;
 
+    // Disable NVIC interrupts
     NVIC_DisableIRQ(EXTI0_1_IRQn);
-	NVIC_DisableIRQ(EXTI2_3_IRQn);
-	NVIC_DisableIRQ(EXTI4_15_IRQn );
+    NVIC_DisableIRQ(EXTI2_3_IRQn);
+    NVIC_DisableIRQ(EXTI4_15_IRQn);
+}
+
+static void PM_PrepareBLEForStop(void) {
+    if (!g_bm70.initialized) return;
+
+    // Store connection state before STOP
+    if (ble_is_connected() && g_bm70.conn_info.handle != 0) {
+        LOG_INFO("BLE connected before STOP - Handle: 0x%02X", g_bm70.conn_info.handle);
+        g_bm70.hid_state.suspended = true;
+
+    } else {
+        g_bm70.hid_state.suspended = false;
+    }
+}
+
+static void PM_RestoreBLEAfterStop(void) {
+    if (!g_bm70.initialized) return;
+
+    // Give BLE module time to stabilize after STOP
+    HAL_Delay(10);
+
+    // Process any RX data that arrived during STOP
+    bm70_process_rx(&g_bm70);
+
+    if (g_bm70.hid_state.suspended) {
+        // Check if connection survived STOP mode
+        bm70_status_t status;
+        bm70_error_t err = bm70_get_status(&g_bm70, &status);
+
+        if (err == BM70_OK && ble_conn_flag && g_bm70.conn_info.handle != 0) {
+            LOG_INFO("BLE connection maintained - Handle: 0x%02X", g_bm70.conn_info.handle);
+            g_bm70.hid_state.suspended = false;
+        } else {
+            LOG_WARNING("BLE connection lost during STOP");
+            // Clean up connection state
+            ble_conn_flag = false;
+            g_bm70.conn_state = BM70_CONN_STATE_DISCONNECTED;
+            memset(&g_bm70.conn_info, 0, sizeof(g_bm70.conn_info));
+            g_bm70.hid_state.service_ready = false;
+            g_bm70.hid_state.notifications_enabled = false;
+            g_bm70.hid_state.suspended = false;
+
+            // Schedule advertising restart
+            g_bm70.hid_state.mtu_received_time = HAL_GetTick() + 2000;
+        }
+    }
+}
+
+// 2. I2C-only peripheral management (simplified for LED drivers)
+static void PM_SuspendI2C(void) {
+
+}
+
+static void PM_ResumeI2C(void) {
+
 }
 
 /**
@@ -144,11 +192,13 @@ void PM_Init(void) {
     current_pm_state = PM_STATE_ACTIVE;
 
     // Check if USB is connected at startup
-    if (VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin) {  // VBUS detect
+    if (!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {  // VBUS detect
         g_connection_mode = CONNECTION_USB;
+        kb_state.output_mode = OUTPUT_USB;
         LOG_INFO("Power management initialized in USB mode");
     } else {
         g_connection_mode = CONNECTION_BLE;
+        kb_state.output_mode = OUTPUT_BLE;
         LOG_INFO("Power management initialized in BLE mode");
     }
 
@@ -156,7 +206,7 @@ void PM_Init(void) {
     battery_level = PM_GetBatteryLevel();
 
     // Initialize EXTI for column detection
-    EXTI_Columns_Init();
+    EXTI_Rows_Init();
 
     // Initialize LPTIM for IWDG feeding in STOP mode
     PM_ConfigureLPTIM();
@@ -174,11 +224,39 @@ static void PM_EnterStopMode(void) {
     	USBD_Stop(&hUsbDeviceFS);
     }
 
+    if (g_connection_mode == CONNECTION_BLE) {
+            PM_PrepareBLEForStop();
+        }
+
+    PM_SuspendI2C();
+
     // Configure STOPWUCK to use HSI16 for faster wakeup
     RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_STOPWUCK) | RCC_CFGR_STOPWUCK;
 
     // Configure wake-up from STOP mode
     PM_ConfigureKeyEXTI(true);
+
+    LPUART1->CR1 |= USART_CR1_UESM;
+	LPUART1->CR3 |= USART_CR3_WUS_1;
+	EXTI->IMR |= (1 << 28);
+	EXTI->RTSR |= (1 << 28);
+
+	NVIC->ICPR[0] = 0xFFFFFFFF;
+
+	EXTI->PR = 0xFFFFFFFF;
+
+	// Clear LPUART flags and flush RX buffer
+	LPUART1->ICR = USART_ICR_WUCF | USART_ICR_IDLECF | USART_ICR_ORECF |
+				   USART_ICR_NECF | USART_ICR_FECF | USART_ICR_PECF;
+
+	// Read and discard any pending LPUART data
+	while (LPUART1->ISR & USART_ISR_RXNE) {
+		volatile uint8_t dummy = LPUART1->RDR;
+		(void)dummy;
+	}
+
+	// Clear LPTIM flags
+	LPTIM1->ICR = LPTIM_ICR_ARRMCF;
 
     // Calculate timer period for IWDG feeding (LSI/128)
     uint32_t lptim_period = (LSI_CLOCK_FREQ / 128) * IWDG_FEED_PERIOD_MS / 1000;
@@ -192,9 +270,6 @@ static void PM_EnterStopMode(void) {
 
     // Stop TIM3 (scanning timer)
     TIM3->CR1 &= ~TIM_CR1_CEN;
-
-    // Clear pending EXTI flags
-    EXTI->PR = 0xFFFF;
 
     // Disable systick interrupt during STOP
     SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
@@ -227,6 +302,14 @@ static void PM_ExitStopMode(void) {
     // Restart TIM3 (scanning timer)
     TIM3->CR1 |= TIM_CR1_CEN;
 
+    // Resume I2C peripherals
+	PM_ResumeI2C();
+
+	// Restore BLE state if needed
+	if (g_connection_mode == CONNECTION_BLE) {
+		PM_RestoreBLEAfterStop();
+	}
+
     // Resume USB if connected
     if (g_connection_mode == CONNECTION_USB) {
     	USBD_Start(&hUsbDeviceFS);
@@ -234,7 +317,12 @@ static void PM_ExitStopMode(void) {
 
     // Disable EXTI for normal operation
     PM_ConfigureKeyEXTI(false);
+
+    EXTI->IMR &= ~(1 << 28);
+	LPUART1->CR1 &= ~USART_CR1_UESM;
 }
+
+
 
 /**
  * @brief Handle state transitions
@@ -255,7 +343,6 @@ void PM_EnterState(pm_state_t new_state) {
     else if (new_state == PM_STATE_STOP) {
         current_pm_state = PM_STATE_STOP;
         PM_EnterStopMode();
-        // When we wake up, immediately go back to active
         PM_EnterState(PM_STATE_ACTIVE);
     }
 
@@ -282,11 +369,10 @@ void PM_RecordActivity(void) {
  * @param GPIO_Pin The pin that triggered the interrupt
  * @retval None
  */
-void PM_HandleKeyInterrupt(uint16_t GPIO_Pin) {
+void PM_HandleWakeup(void) {
     #ifdef DEBUG_POWER
     dbg_pm_events++;
     #endif
-
     // Record activity to reset timeouts
     last_activity_time = HAL_GetTick();
 
@@ -299,6 +385,12 @@ void PM_HandleKeyInterrupt(uint16_t GPIO_Pin) {
         current_pm_state = PM_STATE_ACTIVE;
         PM_ExitStopMode();
     }
+
+    if (g_connection_mode == CONNECTION_BLE
+    		&& g_bm70.initialized) {
+		// Process any pending BLE RX data
+		bm70_process_rx(&g_bm70);
+	}
 }
 
 /**
@@ -339,41 +431,95 @@ void PM_Update(void) {
  */
 void PM_ConfigureKeyEXTI(bool enable) {
     if (enable) {
-        // Reset all rows first
-        resetRows();
-
-        // Set all columns as inputs with pull-down
-        for (uint8_t col = 0; col < KEY_COLS; col++) {
-            uint32_t pin = col_pins[col];
+        // First, configure all rows as inputs with pull-up
+        for (uint8_t row = 0; row < KEY_ROWS; row++) {
+            uint32_t pin = row_pins[row];
+            GPIO_TypeDef* port = row_ports[row];
             uint32_t pin_pos = 0;
 
             // Find pin position
             while ((pin >> pin_pos) != 1) pin_pos++;
 
             // Configure as input (MODE = 00)
-            col_ports[col]->MODER &= ~(3UL << (pin_pos * 2));
+            port->MODER &= ~(3UL << (pin_pos * 2));
+
+            // Configure pull-up (PUPDR = 01)
+            port->PUPDR &= ~(3UL << (pin_pos * 2));
+            port->PUPDR |= (1UL << (pin_pos * 2));
+
+            // Ensure no output driver is active
+            port->OTYPER &= ~(1UL << pin_pos);
+        }
+
+        // Configure all columns as outputs driven low
+        for (uint8_t col = 0; col < KEY_COLS; col++) {
+            uint32_t pin = col_pins[col];
+            GPIO_TypeDef* port = col_ports[col];
+            uint32_t pin_pos = 0;
+
+            // Find pin position
+            while ((pin >> pin_pos) != 1) pin_pos++;
+
+            // Configure as output (MODE = 01)
+            port->MODER &= ~(3UL << (pin_pos * 2));
+            port->MODER |= (1UL << (pin_pos * 2));
+
+            // Configure as push-pull (OTYPER = 0)
+            port->OTYPER &= ~(1UL << pin_pos);
+
+            // Drive low
+            port->ODR &= ~pin;
+        }
+
+        // Wait for signals to stabilize
+        delay_us(100);
+
+        // Enable EXTI for rows
+        EXTI_Rows_Enable();
+
+    } else {
+        // Disable EXTI first
+        EXTI_Rows_Disable();
+
+        // Configure rows back to outputs
+        for (uint8_t row = 0; row < KEY_ROWS; row++) {
+            uint32_t pin = row_pins[row];
+            GPIO_TypeDef* port = row_ports[row];
+            uint32_t pin_pos = 0;
+
+            // Find pin position
+            while ((pin >> pin_pos) != 1) pin_pos++;
+
+            // Configure as output (MODE = 01)
+            port->MODER &= ~(3UL << (pin_pos * 2));
+            port->MODER |= (1UL << (pin_pos * 2));
+
+            // Configure as push-pull
+            port->OTYPER &= ~(1UL << pin_pos);
+
+            // Start with row low (normal scanning state)
+            port->ODR &= ~pin;
+        }
+
+        // Configure columns back to inputs with pull-down
+        for (uint8_t col = 0; col < KEY_COLS; col++) {
+            uint32_t pin = col_pins[col];
+            GPIO_TypeDef* port = col_ports[col];
+            uint32_t pin_pos = 0;
+
+            // Find pin position
+            while ((pin >> pin_pos) != 1) pin_pos++;
+
+            // Configure as input (MODE = 00)
+            port->MODER &= ~(3UL << (pin_pos * 2));
 
             // Configure pull-down (PUPDR = 10)
-            col_ports[col]->PUPDR &= ~(3UL << (pin_pos * 2));
-            col_ports[col]->PUPDR |= (2UL << (pin_pos * 2));
+            port->PUPDR &= ~(3UL << (pin_pos * 2));
+            port->PUPDR |= (2UL << (pin_pos * 2));
         }
-
-        // Set all rows high for any key detection
-        for (uint8_t row = 0; row < KEY_ROWS; row++) {
-            row_ports[row]->ODR |= row_pins[row];
-        }
-
-        delay_us(25);  // Allow signals to settle
-
-        // Enable EXTI for columns
-        EXTI_Columns_Enable();
-    } else {
-        // Disable EXTI
-        EXTI_Columns_Disable();
-        // Reset rows for normal operation
-        resetRows();
     }
 }
+
 
 /**
  * @brief Set the connection mode (USB or BLE)

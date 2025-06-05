@@ -22,6 +22,7 @@ extern "C" {
 #include "i2c_core.h"
 #include "watchdog.h"
 #include "pmsm.h"
+#include "kb_ble_api.h"
 
 #include "logger.h"
 #include "usb_device.h"
@@ -63,6 +64,9 @@ void IWDG_Init(void);
 
 /*BLE UART Prototypes*/
 void MX_LPUART1_UART_Init(void);
+void bm7x_process_timer(void);
+void tim7_ble_init(void);
+void tim7_ble_stop(void);
 bool uart_transmit_ready(void);
 bool uart_data_ready(void);
 void uart_write(uint8_t data);
@@ -125,10 +129,20 @@ extern const uint16_t col_pins[KEY_COLS];
 /* Bluetooth Related Pins */
 #define BT_RESET_Pin        GPIO_PIN_11
 #define BT_RESET_GPIO_Port  GPIOC
+#define BT_RTS_Pin			GPIO_PIN_1
+#define BT_RTS_GPIO_Port	GPIOB
+#define BT_CTS_Pin			GPIO_PIN_6
+#define BT_CTS_GPIO_Port	GPIOA
+#define BLE_WAKEUP_Pin		GPIO_PIN_7
+#define BT_WAKEUP_GPIO_Port  GPIOC
+#define BLE_TXALERT_Pin		GPIO_PIN_12
+#define BT_TXALERT_GPIO_Port  GPIOC
 #define BLE_STAT1_Pin       GPIO_PIN_13
 #define BLE_STAT1_GPIO_Port GPIOB
 #define BLE_STAT2_Pin       GPIO_PIN_14
 #define BLE_STAT2_GPIO_Port GPIOB
+#define UART_MODE_SW_Pin    GPIO_PIN_6
+#define UART_MODE_SW_GPIO_Port GPIOC
 
 /* Battery Management Pins */
 #define BATT_CHRG_EN_Pin      GPIO_PIN_10
@@ -175,8 +189,6 @@ extern const uint16_t col_pins[KEY_COLS];
 #define PROX_SENSE_INT_GPIO_Port GPIOD
 
 /* Other Control Pins */
-#define UART_MODE_SW_Pin    GPIO_PIN_6
-#define UART_MODE_SW_GPIO_Port GPIOC
 #define EEPROM_WC_Pin       GPIO_PIN_8
 #define EEPROM_WC_GPIO_Port GPIOC
 

@@ -13,7 +13,7 @@
 #include <string.h>
 
 #define LOG_BUFFER_COUNT 8  // Number of buffers in the queue
-#define LOG_BUFFER_SIZE 64 // Size of each buffer
+#define LOG_BUFFER_SIZE 128 // Size of each buffer
 
 typedef struct {
     char buffers[LOG_BUFFER_COUNT][LOG_BUFFER_SIZE];
@@ -41,10 +41,11 @@ typedef enum {
 #endif
 
 // Logging macros
-#define LOG_ERROR(format, ...)   if (DEBUG_LEVEL >= LOG_LEVEL_ERROR)   logger_print("[ERROR] " format "\r\n", ##__VA_ARGS__)
-#define LOG_WARNING(format, ...) if (DEBUG_LEVEL >= LOG_LEVEL_WARNING) logger_print("[WARNING] " format "\r\n", ##__VA_ARGS__)
-#define LOG_INFO(format, ...)    if (DEBUG_LEVEL >= LOG_LEVEL_INFO)    logger_print("[INFO] " format "\r\n", ##__VA_ARGS__)
-#define LOG_DEBUG(format, ...)   if (DEBUG_LEVEL >= LOG_LEVEL_DEBUG)   logger_print("[DEBUG] " format "\r\n", ##__VA_ARGS__)
+#define LOG_ERROR(format, ...)   if (DEBUG_LEVEL >= LOG_LEVEL_ERROR)   logger_print("[E] " format "\r\n", ##__VA_ARGS__)
+#define LOG_WARNING(format, ...) if (DEBUG_LEVEL >= LOG_LEVEL_WARNING) logger_print("[W] " format "\r\n", ##__VA_ARGS__)
+#define LOG_INFO(format, ...)    if (DEBUG_LEVEL >= LOG_LEVEL_INFO)    logger_print("[I] " format "\r\n", ##__VA_ARGS__)
+#define LOG_DEBUG(format, ...)   if (DEBUG_LEVEL >= LOG_LEVEL_DEBUG)   logger_print("[D] " format "\r\n", ##__VA_ARGS__)
+#define LOG_DUMP(format, ...) logger_print(format, ##__VA_ARGS__)
 
 // Function prototypes
 void logger_print(const char *format, ...);

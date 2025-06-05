@@ -75,7 +75,7 @@ LoopCopyDataInit:
   ldr r2, =_sbss
   ldr r4, =_ebss
   movs r3, #0
-  b LoopFillZerobss
+ b LoopFillZerobss
 
 FillZerobss:
   str  r3, [r2]

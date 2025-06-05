@@ -1,63 +1,10 @@
-/* USER CODE BEGIN Header */
-/**
- ******************************************************************************
- * @file    stm32l0xx_it.c
- * @brief   Interrupt Service Routines.
- ******************************************************************************
- * @attention
- *
- * Copyright (c) 2025 Yolk Workshop
- * All rights reserved.
- *
- * This software is licensed under terms that can be found in the LICENSE file
- * in the root directory of this software component.
- *
- ******************************************************************************
- */
-/* USER CODE END Header */
 
-/* Includes ------------------------------------------------------------------*/
+#include "kb_ble_api.h"
 #include "main.h"
 #include "stm32l0xx_it.h"
 #include "pmsm.h"
 #include "logger.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-
-/* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN TD */
-
-/* USER CODE END TD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
-/* USER CODE BEGIN PV */
-
-/* USER CODE END PV */
-
-/* Private function prototypes -----------------------------------------------*/
-/* USER CODE BEGIN PFP */
-
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
-
-/* USER CODE END 0 */
-
-/* External variables --------------------------------------------------------*/
 extern PCD_HandleTypeDef hpcd_USB_FS;
 extern TIM_HandleTypeDef htim3;
 extern DMA_HandleTypeDef hdma_usart2_tx;
@@ -69,7 +16,7 @@ extern volatile uint8_t scan_flag;
 extern volatile ITStatus pmsm_update_flag;
 extern volatile pm_state_t current_pm_state;
 extern keyboard_state_t kb_state;
-
+extern volatile bool bm7x_timer_flag;
 extern volatile uint8_t startup_complete;
 
 /******************************************************************************/
@@ -80,13 +27,8 @@ extern volatile uint8_t startup_complete;
  */
 void NMI_Handler(void)
 {
-	/* USER CODE BEGIN NonMaskableInt_IRQn 0 */
-
-	/* USER CODE END NonMaskableInt_IRQn 0 */
-	/* USER CODE BEGIN NonMaskableInt_IRQn 1 */
 	while (1) {
 	}
-	/* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
 /**
@@ -94,12 +36,7 @@ void NMI_Handler(void)
  */
 void HardFault_Handler(void)
 {
-	/* USER CODE BEGIN HardFault_IRQn 0 */
-
-	/* USER CODE END HardFault_IRQn 0 */
 	while (1) {
-		/* USER CODE BEGIN W1_HardFault_IRQn 0 */
-		/* USER CODE END W1_HardFault_IRQn 0 */
 	}
 }
 
@@ -108,12 +45,7 @@ void HardFault_Handler(void)
  */
 void SVC_Handler(void)
 {
-	/* USER CODE BEGIN SVC_IRQn 0 */
 
-	/* USER CODE END SVC_IRQn 0 */
-	/* USER CODE BEGIN SVC_IRQn 1 */
-
-	/* USER CODE END SVC_IRQn 1 */
 }
 
 /**
@@ -121,12 +53,7 @@ void SVC_Handler(void)
  */
 void PendSV_Handler(void)
 {
-	/* USER CODE BEGIN PendSV_IRQn 0 */
 
-	/* USER CODE END PendSV_IRQn 0 */
-	/* USER CODE BEGIN PendSV_IRQn 1 */
-
-	/* USER CODE END PendSV_IRQn 1 */
 }
 
 /**
@@ -134,13 +61,8 @@ void PendSV_Handler(void)
  */
 void SysTick_Handler(void)
 {
-	/* USER CODE BEGIN SysTick_IRQn 0 */
-
-	/* USER CODE END SysTick_IRQn 0 */
 	HAL_IncTick();
-	/* USER CODE BEGIN SysTick_IRQn 1 */
 
-	/* USER CODE END SysTick_IRQn 1 */
 }
 
 /******************************************************************************/
@@ -153,40 +75,52 @@ void SysTick_Handler(void)
 /**
  * @brief This function handles EXTI line 0 and line 1 interrupts.
  */
+/**
+ * @brief This function handles EXTI line 0 and line 1 interrupts.
+ * Note: Only EXTI1 is used for R0
+ */
 void EXTI0_1_IRQHandler(void)
 {
-    uint32_t pending = EXTI->PR & 0x0003;
-    EXTI->PR = pending;  // Clear all at once
-
-    // Since we only wake from sleep, we don't need to identify specific pin
-    if (pending) {
-        PM_HandleKeyInterrupt(pending);
+    // Check for EXTI1 (R0)
+    if (EXTI->PR & EXTI_PR_PR1) {
+        // Clear the flag
+        EXTI->PR = EXTI_PR_PR1;
+        // Handle the interrupt
+        PM_HandleWakeup();
     }
 }
 
 /**
  * @brief This function handles EXTI line 2 and line 3 interrupts.
+ * EXTI2 = R1, EXTI3 = R2
  */
 void EXTI2_3_IRQHandler(void)
 {
-    uint32_t pending = EXTI->PR & 0x000C;
-    EXTI->PR = pending;  // Clear all at once
+    uint32_t pending = EXTI->PR & (EXTI_PR_PR2 | EXTI_PR_PR3);
 
     if (pending) {
-        PM_HandleKeyInterrupt(pending);
+        // Clear all pending flags at once
+        EXTI->PR = pending;
+
+        // Handle any pending interrupt (we don't need to know which row)
+        PM_HandleWakeup();
     }
 }
 
 /**
  * @brief This function handles EXTI line[4:15] interrupts.
+ * EXTI4 = R3, EXTI5 = R4, EXTI6 = R5
  */
 void EXTI4_15_IRQHandler(void)
 {
-    uint32_t pending = EXTI->PR & 0xFFF0;
-    EXTI->PR = pending;  // Clear all at once
+    uint32_t pending = EXTI->PR & (EXTI_PR_PR4 | EXTI_PR_PR5 | EXTI_PR_PR6);
 
     if (pending) {
-        PM_HandleKeyInterrupt(pending);
+        // Clear the pending flags
+        EXTI->PR = pending;
+
+        // Handle the interrupt (we don't need to know which row)
+        PM_HandleWakeup();
     }
 }
 
@@ -206,14 +140,8 @@ void LPTIM1_IRQHandler(void) {
  */
 void DMA1_Channel2_3_IRQHandler(void)
 {
-	/* USER CODE BEGIN DMA1_Channel2_3_IRQn 0 */
-
-	/* USER CODE END DMA1_Channel2_3_IRQn 0 */
 	HAL_DMA_IRQHandler(&hdma_lpuart1_tx);
 	HAL_DMA_IRQHandler(&hdma_lpuart1_rx);
-	/* USER CODE BEGIN DMA1_Channel2_3_IRQn 1 */
-
-	/* USER CODE END DMA1_Channel2_3_IRQn 1 */
 }
 
 /**
@@ -221,13 +149,7 @@ void DMA1_Channel2_3_IRQHandler(void)
  */
 void DMA1_Channel4_5_6_7_IRQHandler(void)
 {
-	/* USER CODE BEGIN DMA1_Channel4_5_6_7_IRQn 0 */
-
-	/* USER CODE END DMA1_Channel4_5_6_7_IRQn 0 */
 	HAL_DMA_IRQHandler(&hdma_usart2_tx);
-	/* USER CODE BEGIN DMA1_Channel4_5_6_7_IRQn 1 */
-
-	/* USER CODE END DMA1_Channel4_5_6_7_IRQn 1 */
 }
 
 /**
@@ -248,15 +170,6 @@ void TIM3_IRQHandler(void)
 		if (!scan_flag) {
 			scan_flag = SET;
 		}
-
-		/* Refresh watchdog every 10 timer ticks (adjust based on timer frequency)
-		wdg_counter++;
-		if (wdg_counter >= 10) {
-			WDG_Refresh();
-			wdg_counter = 0;
-		}*/
-
-
 	}
 
 	// Check BLE connection every 10 seconds
@@ -275,18 +188,21 @@ void TIM3_IRQHandler(void)
 	/* USER CODE END TIM3_IRQn 1 */
 }
 
+void TIM7_IRQHandler(void)
+{
+    if (TIM7->SR & TIM_SR_UIF) {
+        TIM7->SR &= ~TIM_SR_UIF; // Clear interrupt flag
+        bm7x_timer_flag = true;
+    }
+}
+
+
 /**
  * @brief This function handles USART2 global interrupt.
  */
 void USART2_IRQHandler(void)
 {
-	/* USER CODE BEGIN USART2_IRQn 0 */
-
-	/* USER CODE END USART2_IRQn 0 */
 	HAL_UART_IRQHandler(&huart2);
-	/* USER CODE BEGIN USART2_IRQn 1 */
-
-	/* USER CODE END USART2_IRQn 1 */
 }
 
 /**
@@ -294,16 +210,27 @@ void USART2_IRQHandler(void)
  */
 void RNG_LPUART1_IRQHandler(void)
 {
-	/* USER CODE BEGIN RNG_LPUART1_IRQn 0 */
-	if (__HAL_UART_GET_FLAG(&hlpuart1, UART_FLAG_IDLE)) {
-		__HAL_UART_CLEAR_IDLEFLAG(&hlpuart1);
-		rx_irq_handler();
-	}
-	/* USER CODE END RNG_LPUART1_IRQn 0 */
-	HAL_UART_IRQHandler(&hlpuart1);
-	/* USER CODE BEGIN RNG_LPUART1_IRQn 1 */
+    uint32_t isr = LPUART1->ISR;
 
-	/* USER CODE END RNG_LPUART1_IRQn 1 */
+    // Handle wake-up flag
+    if (isr & USART_ISR_WUF) {
+        LPUART1->ICR = USART_ICR_WUCF;
+        PM_HandleWakeup();
+    }
+
+    // Handle received data
+    if (isr & USART_ISR_RXNE) {
+        PM_RecordActivity();
+    }
+
+    // Clear error flags that could prevent proper operation
+    if (isr & (USART_ISR_ORE | USART_ISR_NE | USART_ISR_FE | USART_ISR_PE)) {
+        LPUART1->ICR = USART_ICR_ORECF | USART_ICR_NECF | USART_ICR_FECF | USART_ICR_PECF;
+    }
+
+    // Call your existing handlers
+    rx_irq_handler();
+    HAL_UART_IRQHandler(&hlpuart1);
 }
 
 /**
@@ -311,12 +238,7 @@ void RNG_LPUART1_IRQHandler(void)
  */
 void USB_IRQHandler(void)
 {
-	/* USER CODE BEGIN USB_IRQn 0 */
-
-	/* USER CODE END USB_IRQn 0 */
 	HAL_PCD_IRQHandler(&hpcd_USB_FS);
-	/* USER CODE BEGIN USB_IRQn 1 */
 
-	/* USER CODE END USB_IRQn 1 */
 }
 

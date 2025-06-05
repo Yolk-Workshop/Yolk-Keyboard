@@ -37,8 +37,8 @@ typedef enum {
 } connection_mode_t;
 
 // Constants for timeout values (in milliseconds)
-#define PM_IDLE_TIMEOUT       30000  // 30 seconds before entering LPR mode
-#define PM_DEEP_SLEEP_TIMEOUT   300000  // 5 minutes before considering standby
+#define PM_IDLE_TIMEOUT       30000  // 45 seconds before entering LPR mode
+#define PM_DEEP_SLEEP_TIMEOUT   12000  // 2 minutes before considering standby
 #define PM_IWDG_TIMEOUT         4000    // 4 seconds IWDG timeout
 
 // Global variables
@@ -51,7 +51,7 @@ void PM_SetConnectionMode(connection_mode_t mode);
 void PM_RecordActivity(void);
 void PM_EnterState(pm_state_t new_state);
 void PM_ConfigureKeyEXTI(bool enable);
-void PM_HandleKeyInterrupt(uint16_t GPIO_Pin);
+void PM_HandleWakeup(void);
 void PM_Update(void);
 uint8_t PM_GetBatteryLevel(void);
 

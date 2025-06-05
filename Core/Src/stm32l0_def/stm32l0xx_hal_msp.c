@@ -192,7 +192,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 		__HAL_LINKDMA(huart, hdmatx, hdma_lpuart1_tx);
 
 		/* LPUART1 interrupt Init */
-		NVIC_SetPriority(RNG_LPUART1_IRQn, 0);
+		NVIC_SetPriority(RNG_LPUART1_IRQn, 1);
 		NVIC_EnableIRQ(RNG_LPUART1_IRQn);
 	}
 	else if (huart->Instance == USART2)
@@ -230,7 +230,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 		// Link DMA to UART
 		__HAL_LINKDMA(huart, hdmatx, hdma_usart2_tx);
 
-		NVIC_SetPriority(USART2_IRQn, 2);
+		NVIC_SetPriority(USART2_IRQn, 3);
 		NVIC_EnableIRQ(USART2_IRQn);
 	}
 
