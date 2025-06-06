@@ -240,8 +240,6 @@ static void process_event(bm70_handle_t *handle, uint8_t opcode,
                             bm70_status_to_string(handle->status));
                 }
 
-                // FIXED: Only update connection state for specific status transitions
-                // Don't assume IDLE = disconnected when we have an active connection
                 switch (handle->status) {
                     case BM70_STATUS_STANDBY:
                         // Only update to advertising if we're not already connected
@@ -262,8 +260,6 @@ static void process_event(bm70_handle_t *handle, uint8_t opcode,
                         break;
 
                     case BM70_STATUS_IDLE:
-                        // CRITICAL FIX: Never disconnect on IDLE status alone
-                        // IDLE can occur during normal connected operation
                         if (handle->conn_state == BM70_CONN_STATE_CONNECTED) {
                             LOG_DEBUG("Module status: idle (connection still active, handle=0x%02X)",
                                      handle->conn_info.handle);
@@ -352,11 +348,18 @@ static void process_event(bm70_handle_t *handle, uint8_t opcode,
                 handle->conn_cb(BM70_CONN_STATE_DISCONNECTED, NULL);
             }
 
-            if (handle->config.auto_reconnect) {
-                LOG_INFO("Auto-reconnect enabled, restarting advertising...");
-                HAL_Delay(500); // Small delay before restarting
-                bm70_start_advertising(handle);
-            }
+            if (handle->device_manager.switch_device) {
+				handle->device_manager.switch_device = false;
+				HAL_Delay(100);
+				bm70_start_directed_advertising(handle);  // Uses directed advertising parameters
+				break;
+			}
+			else if (handle->config.auto_reconnect) {
+				// Normal auto-reconnect (uses current advertising parameters)
+				LOG_INFO("Auto-reconnect enabled, restarting advertising...");
+				HAL_Delay(100);
+				bm70_start_advertising(handle);
+			}
             break;
 
         case BM70_EVT_PAIRING_COMPLETE:
@@ -444,7 +447,7 @@ static void process_event(bm70_handle_t *handle, uint8_t opcode,
             break;
 
         case BM70_EVT_DISCOVER_ALL_SERVICES_RSP: // 0x90
-            LOG_INFO("*** SERVICE RESPONSE #%d ***",
+            LOG_DUMP("\t Service Response - #%d\n",
                      handle->service_discovery_active ? handle->service_responses_received + 1 : 0);
 
             if (handle->service_discovery_active) {
@@ -541,7 +544,7 @@ static void parse_service_discovery_response(bm70_handle_t* handle, const uint8_
     HAL_Delay(1);
     // Your BM71 puts the real attr_len at byte 1, not byte 0
     uint8_t attr_len = data[1];
-    LOG_INFO("Parsing: attr_len=%d, total_len=%d", attr_len, len);
+    //LOG_INFO("Parsing: attr_len=%d, total_len=%d", attr_len, len);
 
     if (attr_len != 6 && attr_len != 20) {
         LOG_WARNING("Unexpected attr_len: %d", attr_len);
@@ -624,13 +627,12 @@ bm70_error_t bm70_init_with_uart(bm70_handle_t* handle,
     handle->hid_state.mtu_size = 23;
     handle->hid_state.waiting_for_conn_update = false;
 	handle->hid_state.mtu_received_time = 0;
+	handle->device_manager.current_adv_mode = 0;
     LOG_INFO("Initializing BM70/71 HID Module");
 
     bm70_hwreset_with_handle(handle);
+    handle->uart.flush_rxbuffer();
 
-    if (handle->uart.flush_rxbuffer) {
-        handle->uart.flush_rxbuffer();
-    }
 
     for (int i = 0; i < 10; i++) {
         bm70_process_rx(handle);
@@ -977,8 +979,20 @@ bm70_error_t bm70_leave_configure_mode(bm70_handle_t* handle)
 /* ============================================================================
  * Connection Management Functions
  * ============================================================================ */
+static bool advertising_params_stale(bm70_handle_t* handle)
+{
+    if (!handle || handle->device_manager.current_adv_mode == BM70_ADV_MODE_UNKNOWN) {
+        return true;
+    }
+
+    // Consider params stale after 30 seconds (in case BM71 reset internally)
+    uint32_t age = HAL_GetTick() - handle->device_manager.adv_param_set_time;
+    return age > 30000;
+}
+
 bm70_error_t bm70_start_advertising(bm70_handle_t* handle)
 {
+
     if (!handle || !handle->initialized) {
         return BM70_ERROR_INVALID_PARAM;
     }
@@ -1013,49 +1027,22 @@ bm70_error_t bm70_start_advertising(bm70_handle_t* handle)
         LOG_ERROR("Failed to send advertising command: %s", bm70_error_to_string(err));
         return err;
     }
-
-    // Wait and check for status changes
-    uint32_t start_time = HAL_GetTick();
-    uint32_t timeout = 1000; // 1 second total timeout (reduced)
-    bool got_standby = false;
-
-    while ((HAL_GetTick() - start_time) < timeout) {
-        bm70_process_rx(handle);
-
-        // Check if we got standby status (successful advertising)
-        if (handle->status == BM70_STATUS_STANDBY) {
-            handle->conn_state = BM70_CONN_STATE_ADVERTISING;
-            LOG_INFO("✓ Advertising started (standby status detected)");
-            got_standby = true;
-            break;
-        }
-
-        HAL_Delay(10); // Smaller delay for more responsive checking
-    }
-
-    if (got_standby) {
-        return BM70_OK;
-    }
-
-    // If we didn't get standby, try the original approach (shorter timeouts)
-    LOG_DEBUG("No standby status - trying original response checking");
-
     // Try status report first (shorter timeout)
-    err = wait_response(handle, BM70_EVT_STATUS_REPORT, 200);
+    err = wait_response(handle, BM70_EVT_STATUS_REPORT, 500);
     if (err == BM70_OK) {
         if (handle->status == BM70_STATUS_STANDBY) {
             handle->conn_state = BM70_CONN_STATE_ADVERTISING;
-            LOG_INFO("✓ Advertising started (status report)");
+            LOG_INFO("Advertising started (status report)");
             return BM70_OK;
         }
     }
 
     // Try command complete (shorter timeout)
-    err = wait_response(handle, BM70_EVT_COMMAND_COMPLETE, 200);
+    err = wait_response(handle, BM70_EVT_COMMAND_COMPLETE, 500);
     if (err == BM70_OK) {
         // Assume advertising started and mark as advertising
         handle->conn_state = BM70_CONN_STATE_ADVERTISING;
-        LOG_INFO("✓ Advertising command completed (marked as advertising)");
+        LOG_INFO("Advertising command completed (marked as advertising)");
         return BM70_OK;
     }
 
@@ -1063,22 +1050,27 @@ bm70_error_t bm70_start_advertising(bm70_handle_t* handle)
     if (handle->status == BM70_STATUS_IDLE) {
         LOG_WARNING("Module stuck in idle - attempting alternative approach");
 
-        // Try leaving configure mode if somehow we're in it
-        uint8_t leave_config = 0x00;
-        send_command(handle, BM70_CMD_LEAVE_CONFIGURE_MODE, &leave_config, 1);
-        HAL_Delay(50); // Shorter delay
+        // Hardware Reset
+        bm70_hwreset_with_handle(handle);
+        HAL_Delay(70); // Shorter delay
 
         // Try advertising again
         err = send_command(handle, BM70_CMD_SET_ADV_ENABLE, &enable, 1);
         if (err == BM70_OK) {
-            LOG_INFO("✓ Retry advertising command sent");
+            LOG_INFO("Retry advertising command sent");
             // Assume it's working and mark as advertising
-            handle->conn_state = BM70_CONN_STATE_ADVERTISING;
-            return BM70_OK;
+            err = wait_response(handle, BM70_EVT_STATUS_REPORT, 500);
+			if (err == BM70_OK) {
+				if (handle->status == BM70_STATUS_STANDBY) {
+					handle->conn_state = BM70_CONN_STATE_ADVERTISING;
+					LOG_INFO("✓ Advertising started (status report)");
+					return BM70_OK;
+				}
+			}
         }
     }
 
-    LOG_ERROR("✗ Failed to start advertising - module may need reset");
+    LOG_ERROR("Failed to start advertising - module may need reset");
     return BM70_ERROR_TIMEOUT;
 }
 
@@ -1249,7 +1241,7 @@ bm70_error_t bm70_verify_configuration(bm70_handle_t* handle)
         LOG_WARNING("Failed to read pairing mode: %s", bm70_error_to_string(err));
     }
 
-    err = bm70_read_all_paired_devices(handle);
+    err = bm70_load_paired_devices(handle);
     if (err != BM70_OK) {
         LOG_WARNING("Failed to read paired devices: %s", bm70_error_to_string(err));
     }
@@ -1907,7 +1899,10 @@ void bm70_read_and_log_characteristic_value(bm70_handle_t* handle,
     }
 }
 
-void bm70_validate_state(bm70_handle_t* handle) {
+void bm70_validate_state(bm70_handle_t* handle)
+{
+    if (!handle) return;
+
     // Ensure software flag matches hardware state
     if (handle->conn_state == BM70_CONN_STATE_CONNECTED &&
         handle->conn_info.handle != 0) {
@@ -1921,4 +1916,623 @@ void bm70_validate_state(bm70_handle_t* handle) {
         handle->hid_state.service_ready = false;
         handle->hid_state.notifications_enabled = false;
     }
+
+    // Device manager state validation and recovery
+    if (handle->device_manager.devices_loaded) {
+        bool state_corrupted = false;
+
+        // Validate device count bounds
+        if (handle->device_manager.device_count > BM70_MAX_PAIRED_DEVICES) {
+            LOG_WARNING("Device count corrupted: %d > %d, resetting to 0",
+                        handle->device_manager.device_count, BM70_MAX_PAIRED_DEVICES);
+            handle->device_manager.device_count = 0;
+            state_corrupted = true;
+        }
+
+        // Validate current device slot
+        if (handle->device_manager.current_device_slot >= BM70_MAX_PAIRED_DEVICES) {
+            LOG_WARNING("Current device slot corrupted: %d >= %d, resetting to 0",
+                        handle->device_manager.current_device_slot, BM70_MAX_PAIRED_DEVICES);
+            handle->device_manager.current_device_slot = 0;
+            state_corrupted = true;
+        }
+
+        // Validate next device slot
+        if (handle->device_manager.next_device_slot >= BM70_MAX_PAIRED_DEVICES) {
+            LOG_WARNING("Next device slot corrupted: %d >= %d, resetting to 0",
+                        handle->device_manager.next_device_slot, BM70_MAX_PAIRED_DEVICES);
+            handle->device_manager.next_device_slot = 0;
+            state_corrupted = true;
+        }
+
+        // Clear switch flag if it's been stuck too long (safety mechanism)
+        static uint32_t switch_start_time = 0;
+
+        if (handle->device_manager.switch_device) {
+            if (switch_start_time == 0) {
+                switch_start_time = HAL_GetTick();
+            } else if ((HAL_GetTick() - switch_start_time) > 10000) {  // 10 second timeout
+                LOG_WARNING("Device switch timeout - clearing switch flag");
+                handle->device_manager.switch_device = false;
+                switch_start_time = 0;
+
+                // Try to recover to standard advertising
+                bm70_set_standard_advertising(handle);
+            }
+        } else {
+            switch_start_time = 0;  // Reset timer when not switching
+        }
+
+        // If state corruption detected, try to reload from BM71
+        if (state_corrupted) {
+            LOG_INFO("State corruption detected, attempting to reload from BM71...");
+            bm70_error_t err = bm70_load_paired_devices(handle);
+            if (err != BM70_OK) {
+                LOG_ERROR("Failed to reload paired devices: %s", bm70_error_to_string(err));
+                // Reset device manager to safe state
+                memset(&handle->device_manager, 0, sizeof(handle->device_manager));
+            }
+        }
+    }
+}
+
+/* ============================================================================
+ * Device Management Implementation
+ * ============================================================================ */
+
+bm70_error_t bm70_load_paired_devices(bm70_handle_t* handle)
+{
+    if (!handle) {
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    // Clear existing device list
+    memset(&handle->device_manager, 0, sizeof(handle->device_manager));
+
+    bm70_error_t err = send_command(handle, BM70_CMD_READ_PAIRED_LIST, NULL, 0);
+    if (err != BM70_OK) {
+        return err;
+    }
+
+    err = wait_response(handle, BM70_EVT_COMMAND_COMPLETE, CMD_GUARD_TIMEOUT);
+    if (err != BM70_OK) {
+        return err;
+    }
+
+    if (handle->response_len < 3) {
+        return BM70_ERROR_PROTOCOL_ERROR;
+    }
+
+    uint8_t status = handle->response_buffer[1];
+    uint8_t num_devices = handle->response_buffer[2];
+
+    if (status != 0x00) {
+        return BM70_ERROR_COMMAND_FAILED;
+    }
+
+    LOG_INFO("BM71 reports %d paired devices", num_devices);
+
+    if (num_devices == 0) {
+        handle->device_manager.devices_loaded = true;
+        return BM70_OK;
+    }
+
+    if (num_devices > BM70_MAX_PAIRED_DEVICES) {
+        num_devices = BM70_MAX_PAIRED_DEVICES;
+    }
+
+    int offset = 3;
+    uint8_t loaded_count = 0;
+
+    for (uint8_t i = 0; i < num_devices && loaded_count < BM70_MAX_PAIRED_DEVICES; i++) {
+        if (offset + 14 > handle->response_len) {
+            break;
+        }
+
+        bm70_paired_device_t* device = &handle->device_manager.devices[loaded_count];
+
+        // Save raw data from BM71 response
+        device->device_index = handle->response_buffer[offset + 0];
+        device->priority = handle->response_buffer[offset + 1];
+        device->addr_type = handle->response_buffer[offset + 2];
+
+        // Save address - try reversed first (usually correct for BT)
+        device->bd_addr[0] = handle->response_buffer[offset + 8];
+        device->bd_addr[1] = handle->response_buffer[offset + 7];
+        device->bd_addr[2] = handle->response_buffer[offset + 6];
+        device->bd_addr[3] = handle->response_buffer[offset + 5];
+        device->bd_addr[4] = handle->response_buffer[offset + 4];
+        device->bd_addr[5] = handle->response_buffer[offset + 3];
+
+        device->is_valid = true;
+        device->is_current = false;
+        device->last_connected = 0;
+
+        LOG_INFO("Device %d: Idx=%d, Pri=%d, Type=%d, Addr=%02X:%02X:%02X:%02X:%02X:%02X",
+                 loaded_count, device->device_index, device->priority, device->addr_type,
+                 device->bd_addr[0], device->bd_addr[1], device->bd_addr[2],
+                 device->bd_addr[3], device->bd_addr[4], device->bd_addr[5]);
+
+        loaded_count++;
+        offset += 14;
+    }
+
+    handle->device_manager.device_count = loaded_count;
+    handle->device_manager.current_device_slot = 0;
+    handle->device_manager.next_device_slot = 0;
+    handle->device_manager.devices_loaded = true;
+
+    LOG_INFO("Loaded %d paired devices", loaded_count);
+    return BM70_OK;
+}
+
+bm70_error_t bm70_set_directed_advertising_to_device(bm70_handle_t* handle, uint8_t device_slot)
+{
+    if (!handle || !handle->initialized) {
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    if (device_slot >= BM70_MAX_PAIRED_DEVICES) {
+        LOG_ERROR("Invalid device slot: %d >= %d", device_slot, BM70_MAX_PAIRED_DEVICES);
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    if (!handle->device_manager.devices_loaded || handle->device_manager.device_count == 0) {
+        LOG_ERROR("No paired devices loaded");
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    bm70_paired_device_t* target_device = &handle->device_manager.devices[device_slot];
+    if (!target_device->is_valid) {
+        LOG_ERROR("Device slot %d is not valid", device_slot);
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    // Smart redundancy check - only skip if already set for same device AND not stale
+    if (handle->device_manager.current_adv_mode == BM70_ADV_MODE_DIRECTED &&
+        handle->device_manager.directed_device_slot == device_slot &&
+        !advertising_params_stale(handle)) {
+        LOG_DEBUG("Directed advertising already configured for device slot %d", device_slot);
+        return BM70_OK;
+    }
+
+    LOG_INFO("Setting directed advertising to device %d (Index=%d, Type=%d)",
+             device_slot, target_device->device_index, target_device->addr_type);
+
+    // Build Set_Advertising_Parameter (0x13) command
+    uint8_t params[10];
+    uint16_t adv_interval = BM70_ADV_INTERVAL_100MS;
+    params[0] = adv_interval & 0xFF;
+    params[1] = (adv_interval >> 8) & 0xFF;
+    params[2] = BM70_ADV_TYPE_DIRECTED;
+    params[3] = target_device->addr_type;
+    memcpy(&params[4], target_device->bd_addr, BM70_BT_ADDR_LEN);
+
+    bm70_error_t err = send_command(handle, BM70_CMD_SET_ADV_PARAMETER, params, 10);
+    if (err != BM70_OK) {
+        LOG_ERROR("Failed to send directed advertising command: %s", bm70_error_to_string(err));
+        return err;
+    }
+
+    err = wait_response(handle, BM70_EVT_COMMAND_COMPLETE, CMD_GUARD_TIMEOUT);
+    if (err != BM70_OK) {
+        LOG_ERROR("Directed advertising command failed: %s", bm70_error_to_string(err));
+        return err;
+    }
+
+    // Update state only on success
+    handle->device_manager.current_adv_mode = BM70_ADV_MODE_DIRECTED;
+    handle->device_manager.directed_device_slot = device_slot;
+    handle->device_manager.adv_param_set_time = HAL_GetTick();
+    handle->device_manager.adv_param_set = true;
+
+    LOG_INFO("✓ Directed advertising configured for device slot %d", device_slot);
+    return BM70_OK;
+}
+
+bm70_error_t bm70_set_standard_advertising(bm70_handle_t* handle)
+{
+    if (!handle || !handle->initialized) {
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    // Smart redundancy check - only skip if already in standard mode AND not stale
+    if (handle->device_manager.current_adv_mode == BM70_ADV_MODE_STANDARD &&
+        !advertising_params_stale(handle)) {
+        LOG_DEBUG("Already in standard advertising mode");
+        return BM70_OK;
+    }
+
+    LOG_INFO("Setting standard (undirected) advertising parameters");
+
+    // Build Set_Advertising_Parameter (0x13) command
+    uint8_t params[10];
+    uint16_t adv_interval = BM70_ADV_INTERVAL_100MS;
+    params[0] = adv_interval & 0xFF;
+    params[1] = (adv_interval >> 8) & 0xFF;
+    params[2] = BM70_ADV_TYPE_UNDIRECTED;
+    params[3] = BM70_ADDR_TYPE_PUBLIC;
+    memset(&params[4], 0, BM70_BT_ADDR_LEN);
+
+    bm70_error_t err = send_command(handle, BM70_CMD_SET_ADV_PARAMETER, params, 10);
+    if (err != BM70_OK) {
+        LOG_ERROR("Failed to send standard advertising command: %s", bm70_error_to_string(err));
+        return err;
+    }
+
+    err = wait_response(handle, BM70_EVT_COMMAND_COMPLETE, CMD_GUARD_TIMEOUT);
+    if (err != BM70_OK) {
+        LOG_ERROR("Standard advertising command failed: %s", bm70_error_to_string(err));
+        return err;
+    }
+
+    // Update state only on success
+    handle->device_manager.current_adv_mode = BM70_ADV_MODE_STANDARD;
+    handle->device_manager.directed_device_slot = 0;  // Not applicable
+    handle->device_manager.adv_param_set_time = HAL_GetTick();
+    handle->device_manager.adv_param_set = false;  // Legacy flag for standard mode
+
+    LOG_INFO("✓ Standard advertising parameters configured");
+    return BM70_OK;
+}
+
+bm70_error_t bm70_start_directed_advertising(bm70_handle_t* handle)
+{
+    if (!handle || !handle->initialized) {
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    uint8_t enable = 0x02; //Enter Standby Mode and only connectable for trust device
+	bm70_error_t err = send_command(handle, BM70_CMD_SET_ADV_ENABLE, &enable, 1);
+	if (err != BM70_OK) {
+		LOG_ERROR("Failed to send advertising command: %s", bm70_error_to_string(err));
+		return err;
+	}
+
+	// Try status report first
+	err = wait_response(handle, BM70_EVT_STATUS_REPORT, 200);
+	if (err == BM70_OK) {
+		if (handle->status == BM70_STATUS_STANDBY) {
+			handle->conn_state = BM70_CONN_STATE_ADVERTISING;
+			LOG_INFO("✓ Advertising started (status report)");
+			return BM70_OK;
+		}
+	}
+
+	// Try command complete
+	err = wait_response(handle, BM70_EVT_COMMAND_COMPLETE, 200);
+	if (err == BM70_OK) {
+		// Assume advertising started and mark as advertising
+		handle->conn_state = BM70_CONN_STATE_ADVERTISING;
+		LOG_INFO("✓ Advertising command completed (marked as advertising)");
+		return BM70_OK;
+	}
+
+	return err;
+}
+
+bm70_error_t bm70_cycle_to_next_device(bm70_handle_t* handle)
+{
+    if (!handle || !handle->initialized) {
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    if (!handle->device_manager.devices_loaded || handle->device_manager.device_count == 0) {
+        LOG_ERROR("No paired devices available for cycling");
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    // Validate current slot bounds
+    if (handle->device_manager.current_device_slot >= BM70_MAX_PAIRED_DEVICES) {
+        LOG_WARNING("Current device slot corrupted: %d, resetting to 0",
+                    handle->device_manager.current_device_slot);
+        handle->device_manager.current_device_slot = 0;
+    }
+
+    // Find next valid device slot
+    uint8_t start_slot = handle->device_manager.current_device_slot;
+    uint8_t attempts = 0;
+    uint8_t next_slot = start_slot;
+
+    do {
+        next_slot = (next_slot + 1) % BM70_MAX_PAIRED_DEVICES;
+        attempts++;
+
+        // Check if this slot has a valid device
+        if (next_slot < handle->device_manager.device_count &&
+            handle->device_manager.devices[next_slot].is_valid) {
+            handle->device_manager.current_device_slot = next_slot;
+            LOG_INFO("device slot %d", next_slot);
+            return BM70_OK;
+        }
+
+        // Prevent infinite loop
+        if (attempts >= BM70_MAX_PAIRED_DEVICES) {
+            break;
+        }
+    } while (next_slot != start_slot);
+
+    LOG_ERROR("No valid devices found for cycling");
+    return BM70_ERROR_INVALID_PARAM;
+}
+
+bm70_error_t bm70_disconnect_for_switch(bm70_handle_t* handle)
+{
+    if (!handle || !handle->initialized) {
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    if (handle->conn_state != BM70_CONN_STATE_CONNECTED) {
+        return BM70_ERROR_NOT_CONNECTED;
+    }
+
+    bm70_error_t err = bm70_disconnect(handle);
+    if (err != BM70_OK) {
+        return err;
+    }
+
+    return err;
+}
+
+bm70_error_t bm70_switch_to_next_device(bm70_handle_t* handle)
+{
+    if (!handle || !handle->initialized) {
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    if (handle->device_manager.switch_device) {
+		LOG_DEBUG("Device switch already in progress");
+		return BM70_ERROR_BUSY;
+	}
+
+    if (handle->hid_state.mtu_received_time != 0) {
+		uint32_t time_since_mtu = HAL_GetTick() - handle->hid_state.mtu_received_time;
+		if (time_since_mtu < 1000) {  // Wait 1 second after MTU update
+			LOG_DEBUG("Connection stabilizing, deferring device switch");
+			return BM70_ERROR_BUSY;
+		}
+	}
+
+    // Validate device manager state
+	if (!handle->device_manager.devices_loaded || handle->device_manager.device_count == 0) {
+		LOG_WARNING("No paired devices available for switching");
+		return BM70_ERROR_INVALID_PARAM;
+	}
+
+    // Step 2: Cycle to next device
+    bm70_error_t err = bm70_cycle_to_next_device(handle);
+    if (err != BM70_OK) {
+    	LOG_ERROR("Failed to cycle to next device: %s", bm70_error_to_string(err));
+        return err;
+    }
+
+    // Step 3: Set directed advertising parameters for the new device
+    err = bm70_set_directed_advertising_to_device(handle, handle->device_manager.current_device_slot);
+    if (err != BM70_OK) {
+    	LOG_ERROR("Failed to set directed advertising: %s", bm70_error_to_string(err));
+        return err;
+    }
+
+    handle->device_manager.switch_device = true;
+    // Step 1: Disconnect current device (if connected)
+    if (handle->conn_state == BM70_CONN_STATE_CONNECTED) {
+        err = bm70_disconnect_for_switch(handle);
+        if (err != BM70_OK) {
+        	LOG_ERROR("Failed to disconnect for switch: %s", bm70_error_to_string(err));
+        	handle->device_manager.switch_device = true;
+            return err;
+        }
+    }
+
+    return BM70_OK;
+}
+
+bm70_error_t bm70_enter_pairing_mode(bm70_handle_t* handle, uint16_t discoverable_timeout)
+{
+	if (!handle || !handle->initialized) {
+		return BM70_ERROR_INVALID_PARAM;
+	}
+
+	// Load current device list first
+	bm70_error_t err = bm70_load_paired_devices(handle);
+	if (err != BM70_OK) {
+		LOG_WARNING("Failed to load paired devices: %s", bm70_error_to_string(err));
+	}
+
+	handle->device_manager.previous_device_slot = handle->device_manager.current_device_slot;
+	// Check if array is full and handle it BEFORE pairing
+	if (handle->device_manager.device_count >= BM70_MAX_PAIRED_DEVICES) {
+		LOG_INFO("Device array full (%d devices), making room for new device...",
+				 handle->device_manager.device_count);
+
+		err = handle_device_array_full(handle);
+		if (err != BM70_OK) {
+			LOG_ERROR("Failed to make room for new device: %s", bm70_error_to_string(err));
+			return err;
+		}
+
+		// Reload device list after deletion
+		err = bm70_load_paired_devices(handle);
+		if (err != BM70_OK) {
+			LOG_WARNING("Failed to reload devices after deletion: %s", bm70_error_to_string(err));
+		}
+
+		LOG_INFO("Made room for new device, now have %d devices",
+				 handle->device_manager.device_count);
+	}
+
+	LOG_INFO("Entering pairing mode (timeout: %d seconds)", discoverable_timeout);
+
+	// If currently connected, disconnect first
+	if (handle->conn_state == BM70_CONN_STATE_CONNECTED) {
+		LOG_INFO("Disconnecting current device to enter pairing mode");
+		err = bm70_disconnect(handle);
+		if (err != BM70_OK) {
+			LOG_WARNING("Failed to disconnect: %s", bm70_error_to_string(err));
+		}
+		HAL_Delay(200); // Wait for disconnect to complete
+	}
+
+	// Set to standard advertising for maximum discoverability
+	err = bm70_set_standard_advertising(handle);
+	if (err != BM70_OK) {
+		LOG_ERROR("Failed to set standard advertising: %s", bm70_error_to_string(err));
+		return err;
+	}
+
+	// Enable pairing mode flags
+	handle->device_manager.pairing_mode_active = true;
+	handle->device_manager.pairing_timeout = discoverable_timeout;
+	handle->device_manager.pairing_start_time = HAL_GetTick();
+	handle->device_manager.allow_new_connections = true;
+
+	// Start advertising to make device discoverable
+	err = bm70_start_advertising(handle);
+	if (err != BM70_OK) {
+		LOG_ERROR("Failed to start advertising for pairing: %s", bm70_error_to_string(err));
+		handle->device_manager.pairing_mode_active = false;
+		return err;
+	}
+
+	LOG_INFO("Pairing mode active - keyboard discoverable for %d seconds", discoverable_timeout);
+	return BM70_OK;
+
+}
+
+bm70_error_t bm70_exit_pairing_mode(bm70_handle_t* handle)
+{
+    if (!handle || !handle->initialized) {
+        return BM70_ERROR_INVALID_PARAM;
+    }
+
+    if (!handle->device_manager.pairing_mode_active) {
+        LOG_DEBUG("Pairing mode not active");
+        return BM70_OK;
+    }
+
+    LOG_INFO("Exiting pairing mode");
+
+    // Clear pairing mode flags
+    handle->device_manager.pairing_mode_active = false;
+    handle->device_manager.allow_new_connections = false;
+    handle->device_manager.pairing_timeout = 0;
+    handle->device_manager.pairing_start_time = 0;
+
+    // Reload paired device list (may have new device)
+    bm70_error_t err = bm70_load_paired_devices(handle);
+    if (err != BM70_OK) {
+        LOG_WARNING("Failed to reload paired devices: %s", bm70_error_to_string(err));
+    }
+
+    err = bm70_stop_advertising(handle);
+    if (err != BM70_OK) {
+		LOG_WARNING("Failed to reload stop advertising: %s", bm70_error_to_string(err));
+	}
+    LOG_INFO("✓ Pairing mode exited");
+    return BM70_OK;
+}
+
+bm70_error_t handle_device_array_full(bm70_handle_t* handle)
+{
+    if (!handle || handle->device_manager.device_count < BM70_MAX_PAIRED_DEVICES) {
+        return BM70_OK;  // Array not full
+    }
+
+    LOG_INFO("Device array full (%d devices), removing last device",
+             BM70_MAX_PAIRED_DEVICES);
+
+    // Simple strategy: remove the last device in the array
+    uint8_t last_slot = handle->device_manager.device_count - 1;
+    bm70_paired_device_t* device_to_remove = &handle->device_manager.devices[last_slot];
+
+    LOG_INFO("Removing last device: Idx=%d, Addr=%02X:%02X:%02X:%02X:%02X:%02X",
+             device_to_remove->device_index,
+             device_to_remove->bd_addr[0], device_to_remove->bd_addr[1],
+             device_to_remove->bd_addr[2], device_to_remove->bd_addr[3],
+             device_to_remove->bd_addr[4], device_to_remove->bd_addr[5]);
+
+    // Delete from BM71 module
+    bm70_error_t err = bm70_delete_paired_device(handle, device_to_remove->device_index);
+    if (err != BM70_OK) {
+        LOG_ERROR("Failed to delete last device: %s", bm70_error_to_string(err));
+        return err;
+    }
+
+    LOG_INFO("Successfully removed last device, reloading device list...");
+    return BM70_OK;
+}
+
+bool bm70_check_pairing_timeout(bm70_handle_t* handle)
+{
+    if (!handle || !handle->device_manager.pairing_mode_active) {
+        return false;  // No pairing mode active, continue normal operations
+    }
+
+    // Check timeout (0 means no timeout)
+    if (handle->device_manager.pairing_timeout == 0) {
+        return false;  // No timeout set, continue normal operations
+    }
+
+    uint32_t elapsed = (HAL_GetTick() - handle->device_manager.pairing_start_time) / 1000;
+    if (elapsed >= handle->device_manager.pairing_timeout) {
+        LOG_INFO("Pairing timeout (%d seconds) - exiting pairing mode",
+                 handle->device_manager.pairing_timeout);
+
+        // Exit pairing mode
+        handle->device_manager.pairing_mode_active = false;
+        handle->device_manager.allow_new_connections = false;
+        handle->device_manager.pairing_timeout = 0;
+        handle->device_manager.pairing_start_time = 0;
+
+        // Reload paired device list (may have new device)
+        bm70_error_t err = bm70_load_paired_devices(handle);
+        if (err != BM70_OK) {
+            LOG_WARNING("Failed to reload paired devices: %s", bm70_error_to_string(err));
+        }
+
+        // *** RESTORE to the previous device slot (the one we were connected to before pairing) ***
+        if (handle->device_manager.device_count > 0) {
+            // Validate previous device slot is still valid
+            if (handle->device_manager.previous_device_slot < handle->device_manager.device_count &&
+                handle->device_manager.devices[handle->device_manager.previous_device_slot].is_valid) {
+
+                handle->device_manager.current_device_slot = handle->device_manager.previous_device_slot;
+                LOG_INFO("Restoring to previous device slot: %d", handle->device_manager.previous_device_slot);
+            } else {
+                LOG_WARNING("Previous device slot %d no longer valid, using slot 0",
+                           handle->device_manager.previous_device_slot);
+                handle->device_manager.current_device_slot = 0;
+            }
+
+            // *** USE bm70_start_directed_advertising for directed advertising ***
+            LOG_INFO("Setting up directed advertising to reconnect to previous device");
+            err = bm70_set_directed_advertising_to_device(handle,
+                handle->device_manager.current_device_slot);
+            if (err == BM70_OK) {
+                // Use directed advertising start function
+                err = bm70_start_directed_advertising(handle);
+                if (err != BM70_OK) {
+                    LOG_WARNING("Directed advertising failed, falling back to standard: %s",
+                               bm70_error_to_string(err));
+                    bm70_set_standard_advertising(handle);
+                    bm70_start_advertising(handle);
+                }
+            } else {
+                // Fallback to standard advertising
+                LOG_WARNING("Failed to set directed advertising, using standard: %s",
+                           bm70_error_to_string(err));
+                bm70_set_standard_advertising(handle);
+                bm70_start_advertising(handle);
+            }
+        } else {
+            // No paired devices, use standard advertising
+            LOG_INFO("No paired devices available, using standard advertising");
+            bm70_set_standard_advertising(handle);
+            bm70_start_advertising(handle);
+        }
+
+        return true;  // Timeout handled, skip other periodic operations
+    }
+
+    return false;  // Still in pairing mode but no timeout yet, continue normal operations
 }

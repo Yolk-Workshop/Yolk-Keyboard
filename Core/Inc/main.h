@@ -23,6 +23,7 @@ extern "C" {
 #include "watchdog.h"
 #include "pmsm.h"
 #include "kb_ble_api.h"
+#include "auto_switch.h"
 
 #include "logger.h"
 #include "usb_device.h"

@@ -8,7 +8,6 @@
 
 #include "pmsm.h"
 #include "logger.h"
-#include "stm32l0xx.h"
 #include "watchdog.h"
 #include "usbd_core.h"
 #include "kb_ble_api.h"
@@ -26,6 +25,7 @@ volatile uint32_t last_activity_time = 0;
 volatile pm_state_t current_pm_state = PM_STATE_ACTIVE;
 volatile connection_mode_t g_connection_mode = CONNECTION_USB;
 static uint8_t battery_level = 100;
+static bool lpm_flag = false;
 
 // Debugging flag for power management events
 #ifdef DEBUG_POWER
@@ -39,6 +39,7 @@ extern void resetRows(void);
 extern keyboard_state_t kb_state;
 extern USBD_HandleTypeDef hUsbDeviceFS;
 extern bm70_handle_t g_bm70;
+extern uint8_t pmsm_mode;
 
 // External row/column definitions from kb_driver.c
 extern const uint16_t row_pins[KEY_ROWS];
@@ -127,51 +128,6 @@ static inline void EXTI_Rows_Disable(void) {
     NVIC_DisableIRQ(EXTI4_15_IRQn);
 }
 
-static void PM_PrepareBLEForStop(void) {
-    if (!g_bm70.initialized) return;
-
-    // Store connection state before STOP
-    if (ble_is_connected() && g_bm70.conn_info.handle != 0) {
-        LOG_INFO("BLE connected before STOP - Handle: 0x%02X", g_bm70.conn_info.handle);
-        g_bm70.hid_state.suspended = true;
-
-    } else {
-        g_bm70.hid_state.suspended = false;
-    }
-}
-
-static void PM_RestoreBLEAfterStop(void) {
-    if (!g_bm70.initialized) return;
-
-    // Give BLE module time to stabilize after STOP
-    HAL_Delay(10);
-
-    // Process any RX data that arrived during STOP
-    bm70_process_rx(&g_bm70);
-
-    if (g_bm70.hid_state.suspended) {
-        // Check if connection survived STOP mode
-        bm70_status_t status;
-        bm70_error_t err = bm70_get_status(&g_bm70, &status);
-
-        if (err == BM70_OK && ble_conn_flag && g_bm70.conn_info.handle != 0) {
-            LOG_INFO("BLE connection maintained - Handle: 0x%02X", g_bm70.conn_info.handle);
-            g_bm70.hid_state.suspended = false;
-        } else {
-            LOG_WARNING("BLE connection lost during STOP");
-            // Clean up connection state
-            ble_conn_flag = false;
-            g_bm70.conn_state = BM70_CONN_STATE_DISCONNECTED;
-            memset(&g_bm70.conn_info, 0, sizeof(g_bm70.conn_info));
-            g_bm70.hid_state.service_ready = false;
-            g_bm70.hid_state.notifications_enabled = false;
-            g_bm70.hid_state.suspended = false;
-
-            // Schedule advertising restart
-            g_bm70.hid_state.mtu_received_time = HAL_GetTick() + 2000;
-        }
-    }
-}
 
 // 2. I2C-only peripheral management (simplified for LED drivers)
 static void PM_SuspendI2C(void) {
@@ -192,7 +148,7 @@ void PM_Init(void) {
     current_pm_state = PM_STATE_ACTIVE;
 
     // Check if USB is connected at startup
-    if (!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {  // VBUS detect
+    if (!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {  //XXX VBUS detect
         g_connection_mode = CONNECTION_USB;
         kb_state.output_mode = OUTPUT_USB;
         LOG_INFO("Power management initialized in USB mode");
@@ -203,7 +159,8 @@ void PM_Init(void) {
     }
 
     // Initialize battery level
-    battery_level = PM_GetBatteryLevel();
+    g_bm70.hid_state.battery_level = PM_GetBatteryLevel();
+    pmsm_mode = 0;
 
     // Initialize EXTI for column detection
     EXTI_Rows_Init();
@@ -224,10 +181,6 @@ static void PM_EnterStopMode(void) {
     	USBD_Stop(&hUsbDeviceFS);
     }
 
-    if (g_connection_mode == CONNECTION_BLE) {
-            PM_PrepareBLEForStop();
-        }
-
     PM_SuspendI2C();
 
     // Configure STOPWUCK to use HSI16 for faster wakeup
@@ -236,13 +189,7 @@ static void PM_EnterStopMode(void) {
     // Configure wake-up from STOP mode
     PM_ConfigureKeyEXTI(true);
 
-    LPUART1->CR1 |= USART_CR1_UESM;
-	LPUART1->CR3 |= USART_CR3_WUS_1;
-	EXTI->IMR |= (1 << 28);
-	EXTI->RTSR |= (1 << 28);
-
 	NVIC->ICPR[0] = 0xFFFFFFFF;
-
 	EXTI->PR = 0xFFFFFFFF;
 
 	// Clear LPUART flags and flush RX buffer
@@ -254,9 +201,6 @@ static void PM_EnterStopMode(void) {
 		volatile uint8_t dummy = LPUART1->RDR;
 		(void)dummy;
 	}
-
-	// Clear LPTIM flags
-	LPTIM1->ICR = LPTIM_ICR_ARRMCF;
 
     // Calculate timer period for IWDG feeding (LSI/128)
     uint32_t lptim_period = (LSI_CLOCK_FREQ / 128) * IWDG_FEED_PERIOD_MS / 1000;
@@ -305,11 +249,6 @@ static void PM_ExitStopMode(void) {
     // Resume I2C peripherals
 	PM_ResumeI2C();
 
-	// Restore BLE state if needed
-	if (g_connection_mode == CONNECTION_BLE) {
-		PM_RestoreBLEAfterStop();
-	}
-
     // Resume USB if connected
     if (g_connection_mode == CONNECTION_USB) {
     	USBD_Start(&hUsbDeviceFS);
@@ -317,9 +256,6 @@ static void PM_ExitStopMode(void) {
 
     // Disable EXTI for normal operation
     PM_ConfigureKeyEXTI(false);
-
-    EXTI->IMR &= ~(1 << 28);
-	LPUART1->CR1 &= ~USART_CR1_UESM;
 }
 
 
@@ -336,12 +272,14 @@ void PM_EnterState(pm_state_t new_state) {
 
     if (new_state == PM_STATE_ACTIVE) {
         if (current_pm_state == PM_STATE_STOP) {
+        	pmsm_mode = 0; // Active mode
             PM_ExitStopMode();
         }
         current_pm_state = PM_STATE_ACTIVE;
     }
     else if (new_state == PM_STATE_STOP) {
         current_pm_state = PM_STATE_STOP;
+        pmsm_mode = 1; // Sleep mode
         PM_EnterStopMode();
         PM_EnterState(PM_STATE_ACTIVE);
     }
@@ -373,11 +311,15 @@ void PM_HandleWakeup(void) {
     #ifdef DEBUG_POWER
     dbg_pm_events++;
     #endif
+    WDG_Refresh();
     // Record activity to reset timeouts
     last_activity_time = HAL_GetTick();
 
     // Set scan flag for matrix scanning
     scan_flag = 1;
+    if (g_connection_mode == CONNECTION_BLE && g_bm70.initialized) {
+		lpm_flag = true;
+	}
 
     // The MCU has already woken from STOP mode when this interrupt fires
     // Force active state if we were in STOP
@@ -385,12 +327,6 @@ void PM_HandleWakeup(void) {
         current_pm_state = PM_STATE_ACTIVE;
         PM_ExitStopMode();
     }
-
-    if (g_connection_mode == CONNECTION_BLE
-    		&& g_bm70.initialized) {
-		// Process any pending BLE RX data
-		bm70_process_rx(&g_bm70);
-	}
 }
 
 /**
@@ -416,6 +352,26 @@ void PM_Update(void) {
         if (current_pm_state == PM_STATE_ACTIVE) {
             PM_EnterState(PM_STATE_STOP);
         }
+    }
+
+    if (lpm_flag){
+    	bm70_error_t err = bm70_read_device_name(&g_bm70);
+		if (err != BM70_OK) {
+
+			// Hardware says disconnected - sync software state
+			ble_conn_flag = false;
+			g_bm70.conn_state = BM70_CONN_STATE_DISCONNECTED;
+			g_bm70.status = BM70_STATUS_IDLE;// Also sync status
+			memset(&g_bm70.conn_info, 0, sizeof(g_bm70.conn_info));
+			g_bm70.hid_state.service_ready = false;
+			g_bm70.hid_state.notifications_enabled = false;
+
+			// Start advertising
+			LOG_INFO("Connection lost during sleep - restarting advertising");
+			bm70_start_advertising(&g_bm70);
+		}
+
+		lpm_flag = false;
     }
 
     // Always refresh watchdog in active mode
@@ -542,6 +498,7 @@ uint8_t PM_GetBatteryLevel(void) {
     // Simplified implementation - just return stored value
     return battery_level;
 }
+
 
 /**
  * @brief System clock configuration

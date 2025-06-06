@@ -37,7 +37,16 @@
 /* GAP Commands */
 #define BM70_CMD_READ_RSSI              0x10    // Read RSSI value
 #define BM70_CMD_SET_ADV_ENABLE         0x1C    // Set advertising enable
+#define BM70_CMD_SET_ADV_PARAMETER      0x13    // Set advertising parameters
 #define BM70_CMD_DISCONNECT             0x1B    // Disconnect
+// Advertising intervals (in 0.625ms units)
+#define BM70_ADV_INTERVAL_100MS         0x00A0  // 100ms (160 * 0.625ms)
+// Advertising types
+#define BM70_ADV_TYPE_UNDIRECTED        0x00    // Connectable undirected advertising
+#define BM70_ADV_TYPE_DIRECTED          0x01    // Connectable directed advertising
+// Address types
+#define BM70_ADDR_TYPE_PUBLIC           0x00    // Public device address
+#define BM70_ADDR_TYPE_RANDOM           0x01    // Random device address
 
 /* GATT Server Commands */
 #define BM70_CMD_SEND_CHAR_VALUE        0x38    // Send characteristic value
@@ -95,6 +104,7 @@
  * ============================================================================ */
 
 // Maximum number of services and characteristics to store
+#define BM70_MAX_PAIRED_DEVICES         4
 #define BM70_MAX_SERVICES           5
 #define BM70_MAX_CHARACTERISTICS    20
 
@@ -202,6 +212,12 @@ typedef enum {
     BM70_ADV_BEACON = 0x04                      // Proprietary beacon
 } bm70_adv_type_t;
 
+typedef enum {
+    BM70_ADV_MODE_UNKNOWN = 0,      // State unknown/uninitialized
+    BM70_ADV_MODE_STANDARD,         // Standard undirected advertising
+    BM70_ADV_MODE_DIRECTED          // Directed advertising to specific device
+} bm70_adv_mode_t;
+
 /* ============================================================================
  * Data Structures
  * ============================================================================ */
@@ -254,16 +270,6 @@ typedef struct {
     bool discovered;
 } bm70_service_t;
 
-/* Characteristic discovery structure */
-typedef struct {
-    uint16_t handle;                    // Declaration handle
-    uint16_t value_handle;              // Value handle
-    uint16_t cccd_handle;               // CCCD handle (if applicable)
-    uint16_t uuid;                      // Characteristic UUID
-    uint8_t properties;                 // Properties bitmask
-    bool discovered;
-} bm70_characteristic_t;
-
 
 /* HID Service State */
 typedef struct {
@@ -308,6 +314,37 @@ typedef struct {
     void (*flush_rxbuffer)(void);                    // Flush RX buffer
 } bm70_uart_interface_t;
 
+/* Paired device information structure */
+typedef struct {
+    uint8_t device_index;                       // BM71 internal device index (0-7)
+    uint8_t priority;                           // Device priority (0=highest)
+    uint8_t addr_type;                          // Address type (0=public, 1=random)
+    uint8_t bd_addr[BM70_BT_ADDR_LEN];          // Bluetooth device address (6 bytes)
+    bool is_valid;                              // Entry validity flag
+    bool is_current;                            // Currently connected device
+    uint32_t last_connected;                    // Last connection timestamp (optional)
+} bm70_paired_device_t;
+
+/* Device management state structure */
+typedef struct {
+    bm70_paired_device_t devices[BM70_MAX_PAIRED_DEVICES];  // Managed device list
+    uint8_t device_count;                       // Number of valid devices
+    uint8_t current_device_slot;                // Currently selected device slot (0-3)
+    uint8_t next_device_slot;                   // Next device to try (0-3)
+    bool switch_device;
+    bool adv_param_set;
+    uint8_t previous_device_slot;  // Store device before pairing mode
+    bm70_adv_mode_t current_adv_mode;      // Current advertising mode
+	uint8_t directed_device_slot;           // Which device slot for directed mode
+	uint32_t adv_param_set_time;            // When params were last set
+    bool devices_loaded;                    // Flag indicating devices are loaded
+
+    bool pairing_mode_active;
+    uint16_t pairing_timeout;
+    uint32_t pairing_start_time;
+    bool allow_new_connections;
+} bm70_device_manager_t;
+
 /* Forward declaration */
 typedef struct bm70_handle bm70_handle_t;
 
@@ -323,6 +360,7 @@ struct bm70_handle {
     /* Configuration */
     bm70_config_t config;               // Module configuration
     bm70_uart_interface_t uart;         // UART interface functions
+    bm70_device_manager_t device_manager;  // Device management state
 
     /* State */
     bool initialized;                   // Initialization flag
@@ -347,9 +385,7 @@ struct bm70_handle {
 
     /* Discovery State */
     bm70_service_t services[BM70_MAX_SERVICES];
-    bm70_characteristic_t characteristics[BM70_MAX_CHARACTERISTICS];
     uint8_t num_services;
-    uint8_t num_characteristics;
     bool discovery_complete;
 
     // Discovery timing
@@ -425,6 +461,17 @@ bm70_error_t bm70_start_advertising(bm70_handle_t* handle);
 bm70_error_t bm70_stop_advertising(bm70_handle_t* handle);
 bm70_error_t bm70_disconnect(bm70_handle_t* handle);
 bm70_error_t bm70_read_rssi(bm70_handle_t* handle, int8_t* rssi);
+bm70_error_t bm70_load_paired_devices(bm70_handle_t* handle);
+bm70_error_t bm70_set_directed_advertising_to_device(bm70_handle_t* handle, uint8_t device_slot);
+bm70_error_t bm70_set_standard_advertising(bm70_handle_t* handle);
+bm70_error_t bm70_start_directed_advertising(bm70_handle_t* handle);
+bm70_error_t bm70_cycle_to_next_device(bm70_handle_t* handle);
+bm70_error_t bm70_disconnect_for_switch(bm70_handle_t* handle);
+bm70_error_t bm70_switch_to_next_device(bm70_handle_t* handle);
+bm70_error_t bm70_enter_pairing_mode(bm70_handle_t* handle, uint16_t discoverable_timeout);
+bm70_error_t bm70_exit_pairing_mode(bm70_handle_t* handle);
+bool bm70_check_pairing_timeout(bm70_handle_t* handle);
+bm70_error_t handle_device_array_full(bm70_handle_t* handle);
 
 /* ============================================================================
  * GATT Service Functions

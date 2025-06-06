@@ -10,11 +10,18 @@
 #include "logger.h"
 #include "main.h"
 
+typedef enum {
+    BLE_CHECK_ACTIVE_MODE = 0,     // Normal active operation
+    BLE_CHECK_SLEEP_MODE = 1,      // Minimal checks for low power
+    BLE_CHECK_MINIMAL_MODE = 2     // Absolute minimum (emergency only)
+} ble_check_mode_t;
+
 // External keyboard state
 extern keyboard_state_t kb_state;
 
 // BM70 handle
 bm70_handle_t g_bm70;
+uint8_t pmsm_mode;
 
 // Connection state
 extern volatile uint8_t ble_conn_flag;
@@ -46,6 +53,56 @@ static const bm70_uart_interface_t uart_interface = {
 #endif
 
 
+static int8_t find_device_by_address(bm70_handle_t* handle, const uint8_t* peer_addr) {
+    if (!handle || !peer_addr || !handle->device_manager.devices_loaded) {
+        return -1;
+    }
+
+    for (uint8_t i = 0; i < handle->device_manager.device_count; i++) {
+        if (handle->device_manager.devices[i].is_valid &&
+            memcmp(handle->device_manager.devices[i].bd_addr, peer_addr, BM70_BT_ADDR_LEN) == 0) {
+            return (int8_t)i;
+        }
+    }
+    return -1; // Device not found
+}
+
+static void add_device_to_list(bm70_handle_t* handle, const bm70_conn_info_t* info) {
+    if (!handle || !info) {
+        LOG_ERROR("Invalid parameters for add_device_to_list");
+        return;
+    }
+
+    if (handle->device_manager.device_count >= BM70_MAX_PAIRED_DEVICES) {
+        LOG_WARNING("Device array is full (%d/%d) - cannot add new device",
+                   handle->device_manager.device_count, BM70_MAX_PAIRED_DEVICES);
+        return;
+    }
+
+    uint8_t slot = handle->device_manager.device_count;
+    bm70_paired_device_t* device = &handle->device_manager.devices[slot];
+
+    // Clear current flag from all other devices
+    for (uint8_t i = 0; i < handle->device_manager.device_count; i++) {
+        handle->device_manager.devices[i].is_current = false;
+    }
+
+    // Add basic info
+    memcpy(device->bd_addr, info->peer_addr, BM70_BT_ADDR_LEN);
+    device->addr_type = info->peer_addr_type;
+    device->is_valid = true;
+    device->is_current = true;
+    device->last_connected = HAL_GetTick();
+    device->device_index = 0xFF; // Unknown until we reload from BM71
+    device->priority = 0; // Will be updated from BM71
+
+    handle->device_manager.device_count++;
+    handle->device_manager.current_device_slot = slot;
+
+    LOG_INFO("Added new device to local list at slot %d (total: %d/%d)",
+             slot, handle->device_manager.device_count, BM70_MAX_PAIRED_DEVICES);
+}
+
 static void on_connection_change(bm70_conn_state_t state, const bm70_conn_info_t* info) {
     switch (state) {
         case BM70_CONN_STATE_ADVERTISING:
@@ -59,21 +116,63 @@ static void on_connection_change(bm70_conn_state_t state, const bm70_conn_info_t
                         info->peer_addr[5], info->peer_addr[4], info->peer_addr[3],
                         info->peer_addr[2], info->peer_addr[1], info->peer_addr[0],
                         info->handle);
-            	}
-				ble_conn_flag = true;
-				g_bm70.conn_state = BM70_CONN_STATE_CONNECTED;
-				g_bm70.status = BM70_STATUS_CONNECTED;  // Also sync status
+			}
 
-				if (info && info->handle != 0) {
-					memcpy(&g_bm70.conn_info, info, sizeof(bm70_conn_info_t));
-					g_bm70.hid_state.service_ready = true;  // Mark HID ready
+			ble_conn_flag = true;
+			g_bm70.conn_state = BM70_CONN_STATE_CONNECTED;
+			g_bm70.status = BM70_STATUS_CONNECTED;  // Also sync status
+
+			if (info && info->handle != 0) {
+				memcpy(&g_bm70.conn_info, info, sizeof(bm70_conn_info_t));
+				g_bm70.hid_state.service_ready = true;
+
+				// Check if we know this device
+				int8_t device_slot = find_device_by_address(&g_bm70, info->peer_addr);
+
+				if (device_slot >= 0) {
+					for (uint8_t i = 0; i < g_bm70.device_manager.device_count; i++) {
+						g_bm70.device_manager.devices[i].is_current = false;
+					}
+					// Known device
+					LOG_INFO("Connected to known device at slot %d", device_slot);
+					g_bm70.device_manager.current_device_slot = (uint8_t)device_slot;
+					g_bm70.device_manager.devices[device_slot].is_current = true;
+				} else {
+					// Unknown device
+					LOG_INFO("Connected to unknown device - adding to list");
+					add_device_to_list(&g_bm70, info);
 				}
+			}
+
+			if (g_bm70.device_manager.pairing_mode_active) {
+				LOG_INFO("New device connected - automatically exiting pairing mode");
+
+				// Clear pairing mode flags
+				g_bm70.device_manager.pairing_mode_active = false;
+				g_bm70.device_manager.allow_new_connections = false;
+				g_bm70.device_manager.pairing_timeout = 0;
+				g_bm70.device_manager.pairing_start_time = 0;
+				g_bm70.device_manager.pairing_mode_active = 0;
+
+				// Reload device list (new device should now be in the list)
+				bm70_error_t err = bm70_load_paired_devices(&g_bm70);
+				if (err != BM70_OK) {
+					LOG_WARNING("Failed to reload paired devices after new connection: %s",
+								bm70_error_to_string(err));
+				}
+
+				LOG_INFO("Pairing mode automatically exited due to new connection");
+			}
 
             break;
 
         case BM70_CONN_STATE_DISCONNECTED:
             LOG_INFO("BLE disconnected");
             ble_conn_flag = false;
+
+            for (uint8_t i = 0; i < g_bm70.device_manager.device_count; i++) {
+				g_bm70.device_manager.devices[i].is_current = false;
+			}
             break;
 
         default:
@@ -180,18 +279,6 @@ void initBluetooth(void) {
     bm70_set_status_callback(&g_bm70, on_status_change);
     bm70_set_data_callback(&g_bm70, on_data_received);
     bm70_set_error_callback(&g_bm70, on_error);
-
-    LOG_INFO("Starting BLE advertising...");
-    err = bm70_start_advertising(&g_bm70);
-    if (err != BM70_OK) {
-        LOG_ERROR("Failed to start advertising: %s", bm70_error_to_string(err));
-        LOG_WARNING("Try restarting or check module configuration");
-    } else {
-        LOG_INFO("BLE advertising started - keyboard is discoverable");
-        LOG_INFO("Device name: %s", config.device_name);
-        LOG_INFO("Ready for BLE HID connections");
-    }
-
 #endif
 }
 
@@ -211,7 +298,7 @@ void sendBLEReport(void)
         return;
     }
 
-    if ((HAL_GetTick() - last_send_time) < 5) {
+    if ((HAL_GetTick() - last_send_time) < 2) {
 		return;
 	}
 
@@ -369,136 +456,205 @@ void ble_verify_module_config(void) {
 }
 
 void ble_periodic_status_check(void) {
-    static uint32_t last_advertising_attempt = 0;
-    static uint32_t last_battery_update = 0;
-    static uint32_t last_connection_test = 0;
-	static uint8_t consecutive_failures = 0;
-	static uint8_t idle_state_count = 0;
-	uint32_t current_time = HAL_GetTick();
 
+   uint32_t battery_interval = 0;
+   uint32_t health_check_interval  = 0;
+   uint32_t advertising_cooldown = 0;
+
+   static uint32_t last_advertising_attempt = 0;
+   static uint32_t last_battery_update = 0;
+   static uint32_t last_connection_test = 0;
+   static uint8_t consecutive_failures = 0;
+   static uint8_t idle_state_count = 0;
+   static uint8_t advertising_failure_count = 0;
+
+   uint32_t current_time = HAL_GetTick();
+
+   if (!g_bm70.initialized) {
+       return;
+   }
+
+   if (bm70_check_pairing_timeout(&g_bm70)) {
+	  LOG_DEBUG("Pairing timeout handled, skipping other periodic operations");
+	  bm70_process_rx(&g_bm70);
+	  return;  // Pairing timeout was handled, don't do other BLE operations
+  }
+
+   switch (pmsm_mode) {
+          case BLE_CHECK_ACTIVE_MODE:
+              battery_interval = 45000;      // 45 seconds
+              health_check_interval = 30000;  // 30 seconds
+              advertising_cooldown = 1000;    // 1 seconds
+              break;
+
+          case BLE_CHECK_SLEEP_MODE:
+              battery_interval = 900000;      // 15 minutes
+              health_check_interval = 600000; // 10 minutes
+              advertising_cooldown = 30000;   // 30 seconds
+              break;
+      }
+
+   bm70_process_rx(&g_bm70);
+
+   if (ble_conn_flag &&
+   	g_bm70.conn_state == BM70_CONN_STATE_CONNECTED &&
+   	(current_time - last_connection_test > health_check_interval)) {
+
+   	bm70_status_t status;
+   	bm70_error_t err = bm70_get_status(&g_bm70, &status);
+
+   	if (err == BM70_ERROR_TIMEOUT) {
+   		consecutive_failures++;
+   		LOG_WARNING("Connection test failed (%d/3) - %s", consecutive_failures, bm70_error_to_string(err));
+
+   		// After 3 consecutive failures, assume silent disconnect
+   		if (consecutive_failures >= 3) {
+   			LOG_ERROR("Silent disconnect detected - cleaning up connection state");
+
+   			// Force disconnect cleanup
+   			ble_conn_flag = false;
+   			g_bm70.conn_state = BM70_CONN_STATE_DISCONNECTED;
+   			memset(&g_bm70.conn_info, 0, sizeof(g_bm70.conn_info));
+   			g_bm70.hid_state.service_ready = false;
+   			g_bm70.hid_state.notifications_enabled = false;
+
+   			// Schedule restart
+   			g_bm70.hid_state.mtu_received_time = HAL_GetTick() + 2000;
+   			consecutive_failures = 0;
+   		}
+   	} else if (err == BM70_OK) {
+   		consecutive_failures = 0; // Reset on success
+   	}
+
+   	last_connection_test = current_time;
+   }
+
+   // Consolidated advertising logic
+   if (!ble_is_connected() && !ble_is_advertising() &&
+       (current_time - last_advertising_attempt > advertising_cooldown)) {
+
+       uint8_t trigger = 0;
+
+       // Check trigger conditions
+       if (g_bm70.hid_state.mtu_received_time > 0 &&
+           current_time > g_bm70.hid_state.mtu_received_time) {
+           trigger = 1; // Scheduled restart
+       }
+       else if (g_bm70.status == BM70_STATUS_IDLE && !ble_is_connected() && idle_state_count >= 15) {
+           trigger = 2; // Stuck in idle
+           idle_state_count = 0;
+       }
+       else if ((current_time - g_last_status_event_time) > advertising_cooldown) {
+           trigger = 3; // No recent status
+       }
+
+       if (trigger > 0) {
+           LOG_INFO("Starting advertising (trigger %d)", trigger);
+           bm70_error_t err = bm70_start_advertising(&g_bm70);
+
+           if (err == BM70_OK) {
+               advertising_failure_count = 0;
+               g_bm70.hid_state.mtu_received_time = 0;
+           } else {
+               advertising_failure_count++;
+               if (advertising_failure_count >= 10) {
+                   bm70_hwreset_with_handle(&g_bm70);
+                   advertising_failure_count = 0;
+                   g_bm70.hid_state.mtu_received_time = 0;
+               }
+           }
+           last_advertising_attempt = current_time;
+       }
+   }
+
+   // Update battery level periodically when connected
+   if (ble_conn_flag && (current_time - last_battery_update > battery_interval)) {
+   	static uint8_t last_sent_level = 0xFF;
+   	//TODO: Implement actual battery read for update
+   	g_bm70.hid_state.battery_level = 85;
+
+   	if(g_bm70.hid_state.battery_level > 0x64) {
+   		g_bm70.hid_state.battery_level = 0x64;
+   	}
+
+       if (g_bm70.hid_state.battery_level != last_sent_level) {
+           bm70_error_t err = bm70_update_battery_level(&g_bm70, g_bm70.hid_state.battery_level);
+           if (err == BM70_OK) {
+               last_sent_level = g_bm70.hid_state.battery_level;
+               LOG_DEBUG("Battery level updated: %d%%", g_bm70.hid_state.battery_level);
+           }
+       }
+       last_battery_update = HAL_GetTick();
+   }
+
+   // Track idle state
+   if (g_bm70.status == BM70_STATUS_IDLE && !ble_is_connected()) {
+       idle_state_count++;
+   } else {
+       idle_state_count = 0;
+   }
+
+}
+
+bool ble_enter_pairing_mode(uint16_t timeout_seconds) {
     if (!g_bm70.initialized) {
-        return;
+        LOG_ERROR("BM70 not initialized");
+        return false;
     }
 
-    bm70_process_rx(&g_bm70);
+    LOG_INFO("User requested pairing mode for %d seconds", timeout_seconds);
+    bm70_error_t err = bm70_enter_pairing_mode(&g_bm70, timeout_seconds);
+    return (err == BM70_OK);
+}
 
-    if (ble_conn_flag &&
-		g_bm70.conn_state == BM70_CONN_STATE_CONNECTED &&
-		(current_time - last_connection_test > 90000)) { // Every 90 seconds
-
-		bm70_status_t status;
-		bm70_error_t err = bm70_get_status(&g_bm70, &status);
-
-		if (err == BM70_ERROR_TIMEOUT) {
-			consecutive_failures++;
-			LOG_WARNING("Connection test failed (%d/3) - %s", consecutive_failures, bm70_error_to_string(err));
-
-			// After 3 consecutive failures, assume silent disconnect
-			if (consecutive_failures >= 3) {
-				LOG_ERROR("Silent disconnect detected - cleaning up connection state");
-
-				// Force disconnect cleanup
-				ble_conn_flag = false;
-				g_bm70.conn_state = BM70_CONN_STATE_DISCONNECTED;
-				memset(&g_bm70.conn_info, 0, sizeof(g_bm70.conn_info));
-				g_bm70.hid_state.service_ready = false;
-				g_bm70.hid_state.notifications_enabled = false;
-
-				// Schedule restart
-				g_bm70.hid_state.mtu_received_time = HAL_GetTick() + 2000;
-				consecutive_failures = 0;
-			}
-		} else if (err == BM70_OK) {
-			consecutive_failures = 0; // Reset on success
-		}
-
-		last_connection_test = current_time;
-	}
-
-    if (!ble_is_connected() &&
-		!ble_is_advertising() &&
-		g_bm70.hid_state.mtu_received_time > 0 &&
-		current_time > g_bm70.hid_state.mtu_received_time &&
-		(current_time - last_advertising_attempt > 5000)) {
-
-		LOG_INFO("Restarting advertising after connection cleanup");
-		bm70_start_advertising(&g_bm70);
-		g_bm70.hid_state.mtu_received_time = 0; // Clear restart flag
-		last_advertising_attempt = current_time;
-	}
-
-    // Handle post-MTU connection setup
-    if (g_bm70.hid_state.waiting_for_conn_update &&
-		g_bm70.hid_state.mtu_received_time > 0 &&  // Valid timestamp
-		(current_time - g_bm70.hid_state.mtu_received_time > 10000)) { // 10 second timeout
-
-        if (!g_bm70.hid_state.consumer_cccd_enabled) {
-            LOG_INFO("Manually enabling consumer CCCD");
-            bm70_enable_cccd_notifications(&g_bm70, HID_CONSUMER_INPUT_CCCD_HANDLE);
-        }
-
-        if (!g_bm70.hid_state.keyboard_cccd_enabled) {
-            LOG_INFO("Manually enabling keyboard CCCD");
-            bm70_enable_cccd_notifications(&g_bm70, HID_KB_INPUT_CCCD_HANDLE);
-        }
-
-        if (!g_bm70.hid_state.battery_cccd_enabled) {
-            LOG_INFO("Manually enabling battery CCCD");
-            bm70_enable_cccd_notifications(&g_bm70, BATTERY_LEVEL_CCCD);
-        }
-
-        g_bm70.hid_state.waiting_for_conn_update = false;
+bool ble_switch_to_next_device(void) {
+    if (!g_bm70.initialized) {
+        LOG_ERROR("BM70 not initialized");
+        return false;
     }
 
-    // Check if we've received any status events recently
-    uint32_t time_since_last_status = current_time - g_last_status_event_time;
+    LOG_INFO("User requested device switch");
+    bm70_error_t err = bm70_switch_to_next_device(&g_bm70);
+    return (err == BM70_OK);
+}
 
-    // Update battery level periodically when connected (every 2 minutes)
-    if (ble_conn_flag && (current_time - last_battery_update > 120000)) {
-    	static uint8_t last_sent_level = 0xFF;
-    	//TODO: Implement actual battery update code <--
-    	g_bm70.hid_state.battery_level = 85; // Your actual battery reading
+bool ble_is_pairing_mode(void) {
+    return g_bm70.initialized && g_bm70.device_manager.pairing_mode_active;
+}
 
-    	if(g_bm70.hid_state.battery_level > 0x64) {
-    		g_bm70.hid_state.battery_level = 0x64;
-    	}
-
-        // Only send if level changed
-        if (g_bm70.hid_state.battery_level != last_sent_level) {
-            bm70_error_t err = bm70_update_battery_level(&g_bm70, g_bm70.hid_state.battery_level);
-            if (err == BM70_OK) {
-                last_sent_level = g_bm70.hid_state.battery_level;
-                LOG_DEBUG("Battery level updated: %d%%", g_bm70.hid_state.battery_level);
-            }
-        }
-        last_battery_update = HAL_GetTick();
+uint32_t ble_get_pairing_time_remaining(void) {
+    if (!g_bm70.initialized || !g_bm70.device_manager.pairing_mode_active) {
+        return 0;
     }
 
-    // Track if module is stuck in idle without connection
-    if (g_bm70.status == BM70_STATUS_IDLE && !ble_is_connected()) {
-        idle_state_count++;
-
-        // If stuck in idle for too long, try advertising
-        if (idle_state_count >= 3 && // 3 cycles (6 seconds) in idle
-            (current_time - last_advertising_attempt > 10000)) {
-
-            LOG_INFO("Module stuck in idle - attempting advertising");
-            bm70_start_advertising(&g_bm70);
-            last_advertising_attempt = current_time;
-            idle_state_count = 0; // Reset counter
-        }
-    } else {
-        idle_state_count = 0; // Reset if not idle or if connected
+    uint32_t elapsed = (HAL_GetTick() - g_bm70.device_manager.pairing_start_time) / 1000;
+    if (elapsed >= g_bm70.device_manager.pairing_timeout) {
+        return 0;
     }
 
-    // If we haven't seen a status event in a while and not connected, try advertising
-    if (!ble_is_connected() && !ble_is_advertising() &&
-        time_since_last_status > 30000 && // 30 seconds without status
-        (current_time - last_advertising_attempt > 15000)) { // Don't try too often
+    return g_bm70.device_manager.pairing_timeout - elapsed;
+}
 
-        LOG_INFO("No recent status events - attempting advertising");
-        bm70_start_advertising(&g_bm70);
-        last_advertising_attempt = current_time;
+bool ble_exit_pairing_mode(void) {
+    if (!g_bm70.initialized) {
+        LOG_ERROR("BM70 not initialized");
+        return false;
     }
 
+    if (!g_bm70.device_manager.pairing_mode_active) {
+        LOG_DEBUG("Not in pairing mode");
+        return true;
+    }
+
+    LOG_INFO("User requested exit pairing mode");
+    bm70_error_t err = bm70_exit_pairing_mode(&g_bm70);
+    return (err == BM70_OK);
+}
+
+uint8_t ble_get_paired_device_count(void) {
+    if (!g_bm70.initialized || !g_bm70.device_manager.devices_loaded) {
+        return 0;
+    }
+
+    return g_bm70.device_manager.device_count;
 }

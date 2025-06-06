@@ -26,24 +26,65 @@ static uint8_t last_key_col = 0xFF;
 static uint32_t phantom_count = 0;
 static uint32_t valid_key_count = 0;
 
+static uint32_t fn_p_press_start_time = 0;
+static bool fn_p_hold_active = false;
+static bool fn_p_pairing_triggered = false;
+static uint32_t last_device_switch_time = 0;
+static bool device_switch_cooldown = false;
+
 static uint32_t last_column_time[KEY_COLS] = {0};
 static bool isPhantomKey(uint8_t row, uint8_t col, uint32_t current_time, bool pressed);
+static void handleKeyPress(uint8_t keycode);
+static void handleKeyRelease(uint8_t keycode);
 
 // Keymaps
-keymap_t base_keymap = { { KC_ESCAPE, KC_F1, KC_F2, KC_F3, KC_F4, KC_F5, KC_F6,
-		KC_F7, KC_F8, KC_F9, KC_F10, KC_F11, KC_F12, KC_DELETE }, { KC_GRAVE,
-		KC_1, KC_2, KC_3, KC_4, KC_5, KC_6, KC_7, KC_8, KC_9, KC_0, KC_MINUS,
-		KC_EQUAL, KC_BSPACE }, { KC_TAB, KC_Q, KC_W, KC_E, KC_R, KC_T, KC_Y,
-		KC_U, KC_I, KC_O, KC_P, KC_LBRACKET, KC_RBRACKET, KC_ENTER }, { KC_CAPS,
-		KC_A, KC_S, KC_D, KC_F, KC_G, KC_H, KC_J, KC_K, KC_L, KC_SCOLON,
-		KC_QUOTE, KC_NONUS_HASH, KC_SWAP }, { KC_LSHIFT, KC_NONUS_BSLASH, KC_Z,
-		KC_X, KC_C, KC_V, KC_B, KC_N, KC_M, KC_COMMA, KC_DOT, KC_SLASH, KC_UP,
-		KC_RSHIFT }, { KC_FN, KC_LCTRL, KC_LGUI, KC_LALT, KC_SPACE, KC_RALT,
-		KC_RCTRL, KC_LEFT, KC_DOWN, KC_RIGHT, KC_NO, KC_NO, KC_NO, KC_NO } };
+keymap_t base_keymap = {
 
-keymap_t fn_keymap = { { KC_NO, KC_LOWER_BRIGHT, KC_INCR_BRIGHT, KC_APPLICATION,
-		KC_FIND, KC_MIC_TOGGLE, KC_BACKLIGHT_DIM, KC_BACKLIGHT_INCR, KC_PREV,
-		KC_PLAY, KC_NEXT, KC_VOLDOWN, KC_VOLUP, KC_LOCK } };
+		{ KC_ESCAPE, KC_F1, KC_F2, KC_F3, KC_F4, KC_F5, KC_F6,
+		KC_F7, KC_F8, KC_F9, KC_F10, KC_F11, KC_F12, KC_DELETE },
+
+		{ KC_GRAVE, KC_1, KC_2, KC_3, KC_4, KC_5, KC_6, KC_7,
+		KC_8, KC_9, KC_0, KC_MINUS, KC_EQUAL, KC_BSPACE },
+
+		{ KC_TAB, KC_Q, KC_W, KC_E, KC_R, KC_T, KC_Y,
+		KC_U, KC_I, KC_O, KC_P, KC_LBRACKET, KC_RBRACKET, KC_ENTER },
+
+		{ KC_CAPS, KC_A, KC_S, KC_D, KC_F, KC_G, KC_H, KC_J, KC_K,
+		KC_L, KC_SCOLON, KC_QUOTE, KC_NONUS_HASH, KC_SWAP },
+
+		{ KC_LSHIFT, KC_NONUS_BSLASH, KC_Z, KC_X, KC_C, KC_V, KC_B,
+		KC_N, KC_M, KC_COMMA, KC_DOT, KC_SLASH, KC_UP, KC_RSHIFT },
+
+		{ KC_FN, KC_LCTRL, KC_LGUI, KC_LALT, KC_SPACE, KC_RALT,
+		KC_RCTRL, KC_LEFT, KC_DOWN, KC_RIGHT, KC_NO, KC_NO, KC_NO, KC_NO }
+	};
+
+keymap_t fn_keymap = {
+    // Row 0: F1-F12, Delete row
+    { KC_NO, KC_LOWER_BRIGHT, KC_INCR_BRIGHT, KC_APPLICATION,
+      KC_FIND, KC_MIC_TOGGLE, KC_BACKLIGHT_DIM, KC_BACKLIGHT_INCR, KC_PREV,
+      KC_PLAY, KC_NEXT, KC_VOLDOWN, KC_VOLUP, KC_LOCK },
+
+    // Row 1: Number row (1-9, 0, -, =, Backspace)
+    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
+      KC_NO, KC_NO, KC_NO, KC_NO },
+
+    // Row 2: QWERTY row (Q-P, [, ], Enter) - P is at position 10
+    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
+      KC_P, KC_NO, KC_NO, KC_NO },  // KC_P for pairing control
+
+    // Row 3: ASDF row (A-L, ;, ', #, SWAP) - SWAP is at position 13
+    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
+      KC_NO, KC_NO, KC_NO, KC_SWAP },  // KC_SWAP for device switching
+
+    // Row 4: ZXCV row (Shift, \, Z-M, comma, period, /, Up, RShift)
+    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
+      KC_NO, KC_NO, KC_NO, KC_NO },
+
+    // Row 5: Bottom row (Fn, Ctrl, Win, Alt, Space, RAlt, RCtrl, arrows)
+    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
+      KC_NO, KC_NO, KC_NO, KC_NO }
+};
 
 StateHandler stateMachine[5] = { [KEY_IDLE] = handleIdle, [KEY_DEBOUNCE
 		] = handleDebounce, [KEY_PRESSED ] = handlePressed, [KEY_HELD
@@ -197,6 +238,244 @@ uint8_t getFuncBit(uint8_t keycode)
     }
 }
 
+
+static bool process_ble_pairing_key(bool pressed)
+{
+    extern volatile connection_mode_t g_connection_mode;
+
+    if (g_connection_mode != CONNECTION_BLE) {
+        return false; // Only process in BLE mode
+    }
+
+    uint32_t current_time = getMicroseconds();
+
+    if (pressed) {
+        // Key pressed - start timing
+        fn_p_press_start_time = current_time;
+        fn_p_hold_active = true;
+        fn_p_pairing_triggered = false;
+        LOG_DEBUG("Fn+P pressed, starting %dms timer for pairing mode", BLE_PAIRING_HOLD_TIME_MS);
+        return true;
+
+    } else {
+        // Key released - check for short press action
+        if (fn_p_hold_active && !fn_p_pairing_triggered) {
+            uint32_t hold_duration = (current_time - fn_p_press_start_time) / 1000; // Convert to ms
+
+            if (hold_duration < BLE_PAIRING_SHORT_PRESS_MS) {
+                // Short press - exit pairing mode if active
+                if (ble_is_pairing_mode()) {
+                    LOG_INFO("Fn+P short press - exiting pairing mode");
+                    if (ble_exit_pairing_mode()) {
+                        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_PAIRING_EXIT);
+                        LOG_INFO("Successfully exited pairing mode");
+                    } else {
+                        LOG_ERROR("Failed to exit pairing mode");
+                        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+                    }
+                } else {
+                    LOG_DEBUG("Fn+P short press - not in pairing mode, no action");
+                }
+            }
+            // Note: Long press (3+ seconds) is handled in check_ble_key_functions()
+        }
+
+        // Reset state on key release
+        fn_p_hold_active = false;
+        fn_p_pairing_triggered = false;
+        return true;
+    }
+}
+
+static bool process_ble_device_switch_key(bool pressed)
+{
+    extern volatile connection_mode_t g_connection_mode;
+
+    if (g_connection_mode != CONNECTION_BLE) {
+        return false; // Only process in BLE mode
+    }
+
+    if (!pressed) {
+        return true; // We only act on key press, not release
+    }
+
+    if (device_switch_cooldown) {
+        uint32_t current_time = getMicroseconds() / 1000; // Convert to ms
+        uint32_t time_since_last = current_time - last_device_switch_time;
+
+        if (time_since_last < BLE_DEVICE_SWITCH_COOLDOWN_MS) {
+            LOG_DEBUG("Device switch on cooldown (%lu ms remaining)",
+                     BLE_DEVICE_SWITCH_COOLDOWN_MS - time_since_last);
+            return true; // Handled but ignored due to cooldown
+        }
+    }
+
+    LOG_INFO("Fn+SWAP pressed - initiating device switch");
+
+    // Check if we have multiple devices to switch between
+    uint8_t device_count = ble_get_paired_device_count();
+    if (device_count < 2) {
+        LOG_WARNING("Cannot switch devices - only %d device(s) paired", device_count);
+        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+        return true;
+    }
+
+    // Attempt device switch
+    if (ble_switch_to_next_device()) {
+        LOG_INFO("Device switch initiated successfully");
+
+        // Set cooldown to prevent rapid switching
+        last_device_switch_time = getMicroseconds() / 1000;
+        device_switch_cooldown = true;
+
+        // Provide visual feedback
+        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_DEVICE_SWITCH);
+
+    } else {
+        LOG_WARNING("Device switch failed - check BLE module status");
+        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+    }
+
+    return true;
+}
+
+static bool process_media_key(uint8_t keycode, bool pressed)
+{
+    extern volatile connection_mode_t g_connection_mode;
+
+    if (g_connection_mode == CONNECTION_BLE) {
+        // BLE mode: Use HID Usage codes for media keys
+        uint16_t usage_code = getStdFuncBit(keycode);
+
+        if (usage_code != 0) { // Valid consumer key
+            if (pressed) {
+                kb_state.consumer_report.buttons[0] = usage_code & 0xFF;
+                kb_state.consumer_report.buttons[1] = (usage_code >> 8) & 0xFF;
+                LOG_DEBUG("BLE media key pressed: 0x%04X", usage_code);
+            } else {
+                kb_state.consumer_report.buttons[0] = 0;
+                kb_state.consumer_report.buttons[1] = 0;
+                LOG_DEBUG("BLE media key released");
+            }
+            report_ready_flag = 1;
+            return true;
+        }
+    } else {
+        // USB mode: Use custom bit mapping
+        uint8_t button_bit = getFuncBit(keycode);
+        uint8_t button_byte = 0;
+
+        // Determine which byte to use for certain keys
+        if (keycode == KC_PAUSE || keycode == KC_FASTFORWARD || keycode == KC_RECORD ||
+            keycode == KC_EJECTCD || keycode == KC_CALCULATOR) {
+            button_byte = 1;
+        }
+
+        if (button_bit != 0) {
+            if (pressed) {
+                // Clear both bytes first
+                kb_state.consumer_report.buttons[0] = 0;
+                kb_state.consumer_report.buttons[1] = 0;
+                // Set the appropriate bit in the correct byte
+                kb_state.consumer_report.buttons[button_byte] |= button_bit;
+                LOG_DEBUG("USB media key pressed: byte[%d] = 0x%02X", button_byte, button_bit);
+            } else {
+                // On key release, clear both bytes
+                kb_state.consumer_report.buttons[0] = 0;
+                kb_state.consumer_report.buttons[1] = 0;
+                LOG_DEBUG("USB media key released");
+            }
+            report_ready_flag = 1;
+            return true;
+        }
+    }
+
+    return false; // Key not handled as media key
+}
+
+static bool process_system_function_key(uint8_t keycode, bool pressed)
+{
+    switch (keycode) {
+        case KC_LOCK:
+            if (pressed) {
+                kb_state.boot_report.modifiers |= 0x08; // LGUI (Windows key)
+                handleKeyPress(KC_L);
+                LOG_DEBUG("Lock key (Win+L) pressed");
+            } else {
+                handleKeyRelease(KC_L);
+                kb_state.boot_report.modifiers &= ~0x08; // Release LGUI
+                LOG_DEBUG("Lock key (Win+L) released");
+            }
+            report_ready_flag = 1;
+            return true;
+
+        case KC_APPLICATION:
+            // Application/Menu key
+            if (pressed) {
+                handleKeyPress(KC_APPLICATION);
+                LOG_DEBUG("Application key pressed");
+            } else {
+                handleKeyRelease(KC_APPLICATION);
+                LOG_DEBUG("Application key released");
+            }
+            report_ready_flag = 1;
+            return true;
+
+        case KC_FIND:
+            if (pressed) {
+                kb_state.boot_report.modifiers |= 0x01; // LCTRL
+                handleKeyPress(KC_F);
+                LOG_DEBUG("Find key (Ctrl+F) pressed");
+            } else {
+                handleKeyRelease(KC_F);
+                kb_state.boot_report.modifiers &= ~0x01; // Release LCTRL
+                LOG_DEBUG("Find key (Ctrl+F) released");
+            }
+            report_ready_flag = 1;
+            return true;
+
+        default:
+            return false; // Key not handled
+    }
+}
+
+static bool process_internal_function_key(uint8_t keycode, bool pressed)
+{
+    if (!pressed) {
+        return true; // Internal functions only trigger on press
+    }
+
+    switch (keycode) {
+        case KC_LOWER_BRIGHT:
+        	// TODO: Implement device-specific brightness decrease
+            LOG_DEBUG("Internal function: Decrease brightness");
+            return true;
+
+        case KC_INCR_BRIGHT:
+        	// TODO: Implement device-specific brightness increase
+            LOG_DEBUG("Internal function: Increase brightness");
+            return true;
+
+        case KC_MIC_TOGGLE:
+        	// TODO: Implement device-specific microphone toggle
+            LOG_DEBUG("Internal function: Toggle microphone");
+            return true;
+
+        case KC_BACKLIGHT_DIM:
+        	// TODO: Implement device-specific backlight decrease
+            LOG_DEBUG("Internal function: Decrease backlight");
+            return true;
+
+        case KC_BACKLIGHT_INCR:
+        	// TODO: Implement device-specific backlight increase
+            LOG_DEBUG("Internal function: Increase backlight");
+            return true;
+
+        default:
+            return false; // Key not handled
+    }
+}
+
 static void handleKeyPress(uint8_t keycode)
 {
 	if (kb_state.key_count < 6) {
@@ -260,150 +539,40 @@ static void handleNormalKeys(uint8_t keycode, bool pressed)
 	}
 }
 
-static void handleInternalFunction(uint8_t keycode)
-{
-	switch (keycode)
-	{
-		case KC_LOWER_BRIGHT:
-			// TODO: Implement device-specific brightness decrease
-			LOG_DEBUG("Decrease brightness");
-			break;
-
-		case KC_INCR_BRIGHT:
-			// TODO: Implement device-specific brightness increase
-			LOG_DEBUG("Increase brightness");
-			break;
-
-		case KC_MIC_TOGGLE:
-			// TODO: Implement device-specific microphone toggle
-			LOG_DEBUG("Toggle microphone");
-			break;
-
-		case KC_BACKLIGHT_DIM:
-			// TODO: Implement device-specific backlight decrease
-			LOG_DEBUG("Decrease backlight");
-			break;
-
-		case KC_BACKLIGHT_INCR:
-			// TODO: Implement device-specific backlight increase
-			LOG_DEBUG("Increase backlight");
-			break;
-	}
-}
-
 static void handleFnKey(uint8_t keycode, bool pressed)
 {
-	extern volatile connection_mode_t g_connection_mode;
-
-	if (g_connection_mode == CONNECTION_BLE) {
-		// BLE mode: Use HID Usage codes
-		uint16_t usage_code = getStdFuncBit(keycode);
-
-		if (usage_code != 0) {  // Valid consumer key
-			if (pressed) {
-				kb_state.consumer_report.buttons[0] = usage_code & 0xFF;
-				kb_state.consumer_report.buttons[1] = (usage_code >> 8) & 0xFF;
-			} else {
-				kb_state.consumer_report.buttons[0] = 0;
-				kb_state.consumer_report.buttons[1] = 0;
-			}
-			report_ready_flag = 1;
-			return;
-		}
-	} else {
-		// Get the appropriate bit for media controls(USB)
-		uint8_t button_bit = getFuncBit(keycode);
-		uint8_t button_byte = 0; // Default to first byte
-
-		// Handle second byte media keys
-		if (keycode == KC_PAUSE || keycode == KC_FASTFORWARD || keycode == KC_RECORD ||
-			keycode == KC_EJECTCD || keycode == KC_CALCULATOR) {
-			button_byte = 1;
-		}
-
-		// First handle standard consumer control keys
-		if (button_bit != 0) {
-			if (pressed) {
-				// Clear both bytes first
-				kb_state.consumer_report.buttons[0] = 0;
-				kb_state.consumer_report.buttons[1] = 0;
-
-				// Set the appropriate bit in the correct byte
-				kb_state.consumer_report.buttons[button_byte] |= button_bit;
-			}
-			else {
-				// On key release, clear both bytes
-				kb_state.consumer_report.buttons[0] = 0;
-				kb_state.consumer_report.buttons[1] = 0;
-			}
-
-			report_ready_flag = 1;
-			return;
-		}
-	}
-
-    // Now handle special function keys that are not standard consumer controls
-    switch (keycode)
-    {
-        case KC_LOCK:
-            if (pressed) {
-                // Handle lock key as Win+L (standard Windows lock shortcut)
-                kb_state.boot_report.modifiers |= 0x08; // LGUI
-                handleKeyPress(KC_L);
-                LOG_DEBUG("Lock key (Win+L) pressed");
-            }
-            else {
-                // Release Win+L
-                handleKeyRelease(KC_L);
-                kb_state.boot_report.modifiers &= ~0x08; // LGUI
-                LOG_DEBUG("Lock key (Win+L) released");
-            }
-            break;
-
-        case KC_APPLICATION:
-            // Application key (Menu key) - use standard keyboard code
-            if (pressed) {
-                handleKeyPress(KC_APPLICATION);
-                LOG_DEBUG("Application key pressed");
-            }
-            else {
-                handleKeyRelease(KC_APPLICATION);
-                LOG_DEBUG("Application key released");
-            }
-            break;
-
-        case KC_FIND:
-            if (pressed) {
-                // CTRL+F shortcut for find
-                kb_state.boot_report.modifiers |= 0x01; // LCTRL
-                handleKeyPress(KC_F);
-                LOG_DEBUG("Find key (Ctrl+F) pressed");
-            }
-            else {
-                handleKeyRelease(KC_F);
-                kb_state.boot_report.modifiers &= ~0x01; // LCTRL
-                LOG_DEBUG("Find key (Ctrl+F) released");
-            }
-            break;
-
-        case KC_LOWER_BRIGHT:
-        case KC_INCR_BRIGHT:
-        case KC_MIC_TOGGLE:
-        case KC_BACKLIGHT_DIM:
-        case KC_BACKLIGHT_INCR:
-            // Device-specific functions - implement internal handling
-            if (pressed) {
-                // Call internal function for device-specific features
-                handleInternalFunction(keycode);
-                LOG_DEBUG("Internal function key pressed: 0x%02X", keycode);
-            }
-            break;
-
-        default:
-            LOG_DEBUG("Unhandled function key: 0x%02X", keycode);
-            break;
+    // First, try to handle BLE-specific keys
+    if (keycode == KC_P) {
+        if (process_ble_pairing_key(pressed)) {
+            return; // Key handled
+        }
     }
 
+    if (keycode == KC_SWAP) {
+        if (process_ble_device_switch_key(pressed)) {
+            return; // Key handled
+        }
+    }
+
+    // Try to handle as media key
+    if (process_media_key(keycode, pressed)) {
+        return; // Key handled
+    }
+
+    // Try to handle as system function key
+    if (process_system_function_key(keycode, pressed)) {
+        return; // Key handled
+    }
+
+    // Try to handle as internal function key
+    if (process_internal_function_key(keycode, pressed)) {
+        return; // Key handled
+    }
+
+    // If we reach here, the key was not handled
+    LOG_DEBUG("Unhandled function key: 0x%02X (pressed: %d)", keycode, pressed);
+
+    // Set report ready flag for any unhandled keys that might still need processing
     report_ready_flag = 1;
 }
 
@@ -527,5 +696,60 @@ keystate_t handleReleased(uint8_t row, uint8_t col, bool col_pressed,
 		uint32_t current_time)
 {
 	return KEY_IDLE;
+}
+
+void check_ble_key_functions(void)
+{
+    extern volatile connection_mode_t g_connection_mode;
+
+    if (g_connection_mode != CONNECTION_BLE) {
+        return; // Only process BLE functions in BLE mode
+    }
+
+    uint32_t current_time_ms = getMicroseconds() / 1000;
+
+    // Check for 3-second Fn+P hold to enter/exit pairing mode
+    if (fn_p_hold_active && !fn_p_pairing_triggered) {
+        uint32_t hold_duration = current_time_ms - (fn_p_press_start_time / 1000);
+
+        if (hold_duration >= BLE_PAIRING_HOLD_TIME_MS) {
+            // 3 seconds reached - trigger pairing mode toggle
+            fn_p_pairing_triggered = true;
+
+            LOG_INFO("Fn+P held for %dms - toggling pairing mode", BLE_PAIRING_HOLD_TIME_MS);
+
+            if (ble_is_pairing_mode()) {
+                LOG_INFO("Currently in pairing mode - exiting pairing mode");
+                if (ble_exit_pairing_mode()) {
+                    LOG_INFO("Successfully exited pairing mode");
+                    //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_PAIRING_EXIT);
+                } else {
+                    LOG_ERROR("Failed to exit pairing mode");
+                    //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+                }
+            } else {
+                LOG_INFO("Entering pairing mode for 180 seconds (3 minutes)");
+                if (ble_enter_pairing_mode(180)) {  // 3 minutes timeout
+                    LOG_INFO("Pairing mode activated successfully - device is discoverable");
+                    //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_PAIRING_ACTIVE);
+
+                    // Log current paired device count for user information
+                    uint8_t device_count = ble_get_paired_device_count();
+                    LOG_INFO("Currently have %d paired device(s)", device_count);
+                } else {
+                    LOG_ERROR("Failed to enter pairing mode - check BLE module");
+                    //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+                }
+            }
+        }
+    }
+
+    // Clear device switch cooldown after timeout
+    if (device_switch_cooldown) {
+        if ((current_time_ms - last_device_switch_time) >= BLE_DEVICE_SWITCH_COOLDOWN_MS) {
+            device_switch_cooldown = false;
+            LOG_DEBUG("Device switch cooldown cleared");
+        }
+    }
 }
 

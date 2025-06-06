@@ -132,6 +132,14 @@ void LPTIM1_IRQHandler(void) {
         // Feed IWDG immediately in interrupt context
         IWDG->KR = 0xAAAA;
 
+        if (!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {  //FIXME: when battery place invert VBUS detect
+			g_connection_mode = CONNECTION_USB;
+			kb_state.output_mode = OUTPUT_USB;
+		} else {
+			g_connection_mode = CONNECTION_BLE;
+			kb_state.output_mode = OUTPUT_BLE;
+		}
+
     }
 }
 
@@ -210,21 +218,8 @@ void USART2_IRQHandler(void)
  */
 void RNG_LPUART1_IRQHandler(void)
 {
-    uint32_t isr = LPUART1->ISR;
-
-    // Handle wake-up flag
-    if (isr & USART_ISR_WUF) {
-        LPUART1->ICR = USART_ICR_WUCF;
-        PM_HandleWakeup();
-    }
-
-    // Handle received data
-    if (isr & USART_ISR_RXNE) {
-        PM_RecordActivity();
-    }
-
     // Clear error flags that could prevent proper operation
-    if (isr & (USART_ISR_ORE | USART_ISR_NE | USART_ISR_FE | USART_ISR_PE)) {
+    if (LPUART1->ISR & (USART_ISR_ORE | USART_ISR_NE | USART_ISR_FE | USART_ISR_PE)) {
         LPUART1->ICR = USART_ICR_ORECF | USART_ICR_NECF | USART_ICR_FECF | USART_ICR_PECF;
     }
 

@@ -24,6 +24,12 @@
 #define PHANTOM_FILTER_TIME_US 2000
 #define DEBOUNCE_TIME_US 12000
 
+#define BLE_PAIRING_HOLD_TIME_MS        3000    // 3 seconds to enter pairing
+#define BLE_PAIRING_SHORT_PRESS_MS      500     // Max time for short press
+#define BLE_STATUS_LED_UPDATE_MS        250     // LED update frequency
+#define BLE_PAIRING_FEEDBACK_DURATION   2000    // Visual feedback duration
+#define BLE_DEVICE_SWITCH_COOLDOWN_MS 	1000
+
 typedef enum {
     KEY_IDLE,
     KEY_DEBOUNCE,
@@ -132,5 +138,6 @@ uint8_t getModifierBit(uint8_t keycode);
 bool isModifier(uint8_t keycode);
 void clearReport(void);
 void resetKeyboardState(void);
+void check_ble_key_functions(void);
 
 #endif /* INC_KEYS_H_ */

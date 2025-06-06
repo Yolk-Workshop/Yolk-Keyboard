@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define LOG_BUFFER_COUNT 8  // Number of buffers in the queue
+#define LOG_BUFFER_COUNT 6  // Number of buffers in the queue
 #define LOG_BUFFER_SIZE 128 // Size of each buffer
 
 typedef struct {

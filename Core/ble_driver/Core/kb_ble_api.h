@@ -19,6 +19,12 @@ void initBluetooth(void);
 void sendBLEReport(void);
 void checkBLEconnection(void);
 void ble_periodic_status_check(void);
+bool ble_enter_pairing_mode(uint16_t timeout_seconds);
+bool ble_is_pairing_mode(void);
+uint32_t ble_get_pairing_time_remaining(void);
+bool ble_exit_pairing_mode(void);
+bool ble_switch_to_next_device(void);
+uint8_t ble_get_paired_device_count(void);
 
 // Additional BLE control functions
 void ble_disconnect(void);

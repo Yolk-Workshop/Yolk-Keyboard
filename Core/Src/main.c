@@ -49,6 +49,8 @@ extern uint8_t dma_rx_buffer[128];
 extern volatile connection_mode_t g_connection_mode;
 extern volatile bool ble_initialized;
 extern bm70_handle_t g_bm70;
+extern mode_switch_state_t switch_state;
+extern uint32_t switch_start_time;
 
 static log_buffer_t log_queue = { 0 };
 void logger_output(const char *message);
@@ -93,7 +95,7 @@ int main(void)
 
 	PM_Init();
 	/* Initialize USB and Bluetooth */
-	if (g_connection_mode) {
+	if (g_connection_mode == CONNECTION_BLE) {
 		initBluetooth();
 	}
 	else {
@@ -107,6 +109,10 @@ int main(void)
 	/* Main loop */
 	while (1)
 	{
+
+		//check_connection();
+		//if(switch_state == MODE_SWITCH_IN_PROGRESS) continue; XXX
+
 		if (scan_flag)
 		{
 			scanKeyMatrix();
@@ -143,6 +149,8 @@ int main(void)
 				}
 			}
 		}
+
+		check_ble_key_functions();
 
 		// Update power management state
 		PM_Update();
