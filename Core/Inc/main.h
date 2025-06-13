@@ -19,11 +19,12 @@ extern "C" {
 #include "kb_driver.h"
 #include "keys.h"
 #include "keycodes.h"
-#include "i2c_core.h"
 #include "watchdog.h"
 #include "pmsm.h"
 #include "kb_ble_api.h"
 #include "auto_switch.h"
+#include "backlight.h"
+#include "effects.h"
 
 #include "logger.h"
 #include "usb_device.h"

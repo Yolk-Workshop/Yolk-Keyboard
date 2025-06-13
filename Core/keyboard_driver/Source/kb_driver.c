@@ -168,7 +168,6 @@ void sendUSBReport(void)
 	// Debug logging
 	//LOG_DEBUG("Report Transmission:\n");
 	// LOG_DEBUG("Key Count: %d\n", kb_state.key_count);
-
 	if (kb_state.key_count <= 6) {
 		if (memcmp(&kb_state.boot_report, &last_boot_report,
 				sizeof(boot_keyboard_report_t)) != 0) {
@@ -262,7 +261,7 @@ void checkConnection()
 	output_mode_t output_mode;
 
 	__disable_irq();
-	usb_detected = (VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin) == 0;
+	usb_detected = VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin;
 	usb_state = hUsbDeviceFS.dev_state;
 	__enable_irq();
 

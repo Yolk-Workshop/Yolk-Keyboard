@@ -9,6 +9,7 @@
 #include "pmsm.h"
 #include "logger.h"
 #include <string.h>
+#include "effects.h"
 
 // Global state
 ble_hid_report_t ble_report;
@@ -267,11 +268,11 @@ static bool process_ble_pairing_key(bool pressed)
                 if (ble_is_pairing_mode()) {
                     LOG_INFO("Fn+P short press - exiting pairing mode");
                     if (ble_exit_pairing_mode()) {
-                        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_PAIRING_EXIT);
+                    	Effects_BLE_PairingSuccess();
                         LOG_INFO("Successfully exited pairing mode");
                     } else {
                         LOG_ERROR("Failed to exit pairing mode");
-                        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+                        Effects_BLE_PairingFailed(); // Red flash
                     }
                 } else {
                     LOG_DEBUG("Fn+P short press - not in pairing mode, no action");
@@ -316,7 +317,7 @@ static bool process_ble_device_switch_key(bool pressed)
     uint8_t device_count = ble_get_paired_device_count();
     if (device_count < 2) {
         LOG_WARNING("Cannot switch devices - only %d device(s) paired", device_count);
-        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+        Effects_BLE_PairingFailed();
         return true;
     }
 
@@ -329,11 +330,11 @@ static bool process_ble_device_switch_key(bool pressed)
         device_switch_cooldown = true;
 
         // Provide visual feedback
-        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_DEVICE_SWITCH);
+        Effects_BLE_DeviceSwitch(); // Cyan flash
 
     } else {
         LOG_WARNING("Device switch failed - check BLE module status");
-        //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+        Effects_BLE_PairingFailed();
     }
 
     return true;
@@ -462,13 +463,11 @@ static bool process_internal_function_key(uint8_t keycode, bool pressed)
             return true;
 
         case KC_BACKLIGHT_DIM:
-        	// TODO: Implement device-specific backlight decrease
-            LOG_DEBUG("Internal function: Decrease backlight");
+        	Effects_DecreaseBrightness();
             return true;
 
         case KC_BACKLIGHT_INCR:
-        	// TODO: Implement device-specific backlight increase
-            LOG_DEBUG("Internal function: Increase backlight");
+        	Effects_IncreaseBrightness();
             return true;
 
         default:
@@ -706,7 +705,7 @@ void check_ble_key_functions(void)
         return; // Only process BLE functions in BLE mode
     }
 
-    uint32_t current_time_ms = getMicroseconds() / 1000;
+    uint32_t current_time_ms = HAL_GetTick();
 
     // Check for 3-second Fn+P hold to enter/exit pairing mode
     if (fn_p_hold_active && !fn_p_pairing_triggered) {
@@ -722,23 +721,23 @@ void check_ble_key_functions(void)
                 LOG_INFO("Currently in pairing mode - exiting pairing mode");
                 if (ble_exit_pairing_mode()) {
                     LOG_INFO("Successfully exited pairing mode");
-                    //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_PAIRING_EXIT);
+                    Effects_BLE_PairingSuccess();
                 } else {
                     LOG_ERROR("Failed to exit pairing mode");
-                    //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
+                    Effects_BLE_PairingFailed();
                 }
             } else {
                 LOG_INFO("Entering pairing mode for 180 seconds (3 minutes)");
                 if (ble_enter_pairing_mode(180)) {  // 3 minutes timeout
                     LOG_INFO("Pairing mode activated successfully - device is discoverable");
-                    //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_PAIRING_ACTIVE);
+                    Effects_BLE_PairingActive();
 
                     // Log current paired device count for user information
                     uint8_t device_count = ble_get_paired_device_count();
                     LOG_INFO("Currently have %d paired device(s)", device_count);
                 } else {
+                	Effects_BLE_PairingFailed();
                     LOG_ERROR("Failed to enter pairing mode - check BLE module");
-                    //TODO: set_ble_status_led_pattern(BLE_LED_PATTERN_ERROR_BRIEF);
                 }
             }
         }

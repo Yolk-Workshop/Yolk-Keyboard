@@ -25,7 +25,6 @@ extern "C" {
 typedef enum {
 	PM_STATE_ACTIVE = 0,
 	PM_STATE_STOP = 1,
-	PM_STATE_STANDBY = 2
 } pm_state_t;
 
 /**

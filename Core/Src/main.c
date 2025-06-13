@@ -41,8 +41,9 @@ UART_HandleTypeDef huart2;
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
 DMA_HandleTypeDef hdma_usart2_tx;
-DMA_HandleTypeDef hdma_lpuart1_rx;
-DMA_HandleTypeDef hdma_lpuart1_tx;
+//XXX DMA_HandleTypeDef hdma_lpuart1_rx;
+//XXX DMA_HandleTypeDef hdma_lpuart1_tx;
+
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
 extern uint8_t dma_rx_buffer[128];
@@ -62,7 +63,7 @@ void logger_output(const char *message);
 int main(void)
 {
 	/* MCU Configuration--------------------------------------------------------*/
-	HAL_Init();
+  	HAL_Init();
 	SystemClock_Config();
 
 	/* Initialize all configured peripherals */
@@ -93,6 +94,18 @@ int main(void)
 	HAL_TIM_Base_Start_IT(&htim3);
 	LOG_DEBUG("Timer 3 Interrupt Started");
 
+	Backlight_Init();
+
+	if (Effects_Init() != EFFECT_ERROR_NONE) {
+		LOG_ERROR("Effects system initialization failed");
+	} else {
+		LOG_INFO("Effects system initialized");
+
+		// Start beautiful power-on fade effect
+		Effects_StartupSequence(NULL);
+		LOG_INFO("Power-on fade effect started");
+	}
+
 	PM_Init();
 	/* Initialize USB and Bluetooth */
 	if (g_connection_mode == CONNECTION_BLE) {
@@ -109,6 +122,8 @@ int main(void)
 	/* Main loop */
 	while (1)
 	{
+		// Process backlight effects (smooth animations)
+		Effects_Process();
 
 		//check_connection();
 		//if(switch_state == MODE_SWITCH_IN_PROGRESS) continue; XXX
@@ -530,16 +545,14 @@ static void MX_GPIO_Init(void)
 	HAL_GPIO_Init(PS_BRD_VERSION_Port, &GPIO_InitStruct);
 
 	/* LMAT Control Pins */
-	GPIO_InitStruct.Pin = LMAT_RESET_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(LMAT_RESET_GPIO_Port, &GPIO_InitStruct);
 
 	GPIO_InitStruct.Pin = LMAT_SDB_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
-	GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
 	HAL_GPIO_Init(LMAT_SDB_GPIO_Port, &GPIO_InitStruct);
 
 	/* Bluetooth Status Pins */

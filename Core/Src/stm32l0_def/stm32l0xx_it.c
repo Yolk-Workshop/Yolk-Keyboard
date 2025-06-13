@@ -8,8 +8,6 @@
 extern PCD_HandleTypeDef hpcd_USB_FS;
 extern TIM_HandleTypeDef htim3;
 extern DMA_HandleTypeDef hdma_usart2_tx;
-extern DMA_HandleTypeDef hdma_lpuart1_rx;
-extern DMA_HandleTypeDef hdma_lpuart1_tx;
 extern UART_HandleTypeDef huart2;
 extern UART_HandleTypeDef hlpuart1;
 extern volatile uint8_t scan_flag;
@@ -132,7 +130,7 @@ void LPTIM1_IRQHandler(void) {
         // Feed IWDG immediately in interrupt context
         IWDG->KR = 0xAAAA;
 
-        if (!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {  //FIXME: when battery place invert VBUS detect
+        if ((VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {  //FIXME: when battery place invert VBUS detect
 			g_connection_mode = CONNECTION_USB;
 			kb_state.output_mode = OUTPUT_USB;
 		} else {
@@ -148,8 +146,7 @@ void LPTIM1_IRQHandler(void) {
  */
 void DMA1_Channel2_3_IRQHandler(void)
 {
-	HAL_DMA_IRQHandler(&hdma_lpuart1_tx);
-	HAL_DMA_IRQHandler(&hdma_lpuart1_rx);
+
 }
 
 /**
@@ -165,7 +162,6 @@ void DMA1_Channel4_5_6_7_IRQHandler(void)
  */
 void TIM3_IRQHandler(void)
 {
-	/* USER CODE BEGIN TIM3_IRQn 0 */
 	static uint32_t start_time = 0;
 	uint32_t primask = __get_PRIMASK();
 	__disable_irq();
@@ -193,7 +189,6 @@ void TIM3_IRQHandler(void)
 	}
 
 	__set_PRIMASK(primask);
-	/* USER CODE END TIM3_IRQn 1 */
 }
 
 void TIM7_IRQHandler(void)
@@ -204,7 +199,6 @@ void TIM7_IRQHandler(void)
     }
 }
 
-
 /**
  * @brief This function handles USART2 global interrupt.
  */
@@ -212,7 +206,6 @@ void USART2_IRQHandler(void)
 {
 	HAL_UART_IRQHandler(&huart2);
 }
-
 /**
  * @brief This function handles RNG and LPUART1 interrupts / LPUART1 wake-up interrupt through EXTI line 28.
  */
@@ -234,6 +227,11 @@ void RNG_LPUART1_IRQHandler(void)
 void USB_IRQHandler(void)
 {
 	HAL_PCD_IRQHandler(&hpcd_USB_FS);
+
+}
+
+void I2C2_IRQHandler(void)
+{
 
 }
 

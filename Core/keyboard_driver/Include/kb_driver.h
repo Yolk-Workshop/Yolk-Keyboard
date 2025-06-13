@@ -8,14 +8,12 @@
 #ifndef KEYBOARD_DRIVER_KB_DRIVER_H_
 #define KEYBOARD_DRIVER_KB_DRIVER_H_
 
+#include <backlight.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include "main.h"
 #include "keys.h"
 #include "keycodes.h"
-#include "backlight_driver.h"
-
-/* USB includes */
 #include "usbd_def.h"
 #include "usb_device.h"
 

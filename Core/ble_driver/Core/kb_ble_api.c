@@ -4,6 +4,7 @@
  *  Created on: May 14, 2025
  *      Author: bettysidepiece
  */
+#include "effects.h"
 #include "kb_driver.h"
 #include "bm71_config.h"
 #include "kb_ble_api.h"
@@ -119,9 +120,10 @@ static void on_connection_change(bm70_conn_state_t state, const bm70_conn_info_t
 			}
 
 			ble_conn_flag = true;
+
 			g_bm70.conn_state = BM70_CONN_STATE_CONNECTED;
 			g_bm70.status = BM70_STATUS_CONNECTED;  // Also sync status
-
+			Effects_BLE_ConnectionStatus(ble_conn_flag);
 			if (info && info->handle != 0) {
 				memcpy(&g_bm70.conn_info, info, sizeof(bm70_conn_info_t));
 				g_bm70.hid_state.service_ready = true;
@@ -169,7 +171,7 @@ static void on_connection_change(bm70_conn_state_t state, const bm70_conn_info_t
         case BM70_CONN_STATE_DISCONNECTED:
             LOG_INFO("BLE disconnected");
             ble_conn_flag = false;
-
+            Effects_BLE_ConnectionStatus(ble_conn_flag);
             for (uint8_t i = 0; i < g_bm70.device_manager.device_count; i++) {
 				g_bm70.device_manager.devices[i].is_current = false;
 			}

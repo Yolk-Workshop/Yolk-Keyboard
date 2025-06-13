@@ -26,6 +26,8 @@ volatile pm_state_t current_pm_state = PM_STATE_ACTIVE;
 volatile connection_mode_t g_connection_mode = CONNECTION_USB;
 static uint8_t battery_level = 100;
 static bool lpm_flag = false;
+static volatile bool lpm_backlight_off = false;
+static volatile bool lpm_backlight_restore = false;
 
 // Debugging flag for power management events
 #ifdef DEBUG_POWER
@@ -39,6 +41,7 @@ extern void resetRows(void);
 extern keyboard_state_t kb_state;
 extern USBD_HandleTypeDef hUsbDeviceFS;
 extern bm70_handle_t g_bm70;
+extern effect_state_t g_effect;
 extern uint8_t pmsm_mode;
 
 // External row/column definitions from kb_driver.c
@@ -128,16 +131,6 @@ static inline void EXTI_Rows_Disable(void) {
     NVIC_DisableIRQ(EXTI4_15_IRQn);
 }
 
-
-// 2. I2C-only peripheral management (simplified for LED drivers)
-static void PM_SuspendI2C(void) {
-
-}
-
-static void PM_ResumeI2C(void) {
-
-}
-
 /**
  * @brief Initialize the power management system
  * @retval None
@@ -148,7 +141,7 @@ void PM_Init(void) {
     current_pm_state = PM_STATE_ACTIVE;
 
     // Check if USB is connected at startup
-    if (!(VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {  //XXX VBUS detect
+    if ((VBUS_DETECT_GPIO_Port->IDR & VBUS_DETECT_Pin)) {  //XXX Implement Full Connection checking
         g_connection_mode = CONNECTION_USB;
         kb_state.output_mode = OUTPUT_USB;
         LOG_INFO("Power management initialized in USB mode");
@@ -160,6 +153,8 @@ void PM_Init(void) {
 
     // Initialize battery level
     g_bm70.hid_state.battery_level = PM_GetBatteryLevel();
+    g_effect.config.lpm_backlight_off = false;
+    g_effect.config.lpm_backlight_restore = false;
     pmsm_mode = 0;
 
     // Initialize EXTI for column detection
@@ -181,43 +176,45 @@ static void PM_EnterStopMode(void) {
     	USBD_Stop(&hUsbDeviceFS);
     }
 
-    PM_SuspendI2C();
+    if(g_effect.config.lpm_backlight_off == false){
+    	Effects_EnterLPM(g_connection_mode == CONNECTION_USB);
+    	g_effect.config.lpm_backlight_off = true;
 
-    // Configure STOPWUCK to use HSI16 for faster wakeup
-    RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_STOPWUCK) | RCC_CFGR_STOPWUCK;
+		// Configure STOPWUCK to use HSI16 for faster wakeup
+		RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_STOPWUCK) | RCC_CFGR_STOPWUCK;
 
-    // Configure wake-up from STOP mode
-    PM_ConfigureKeyEXTI(true);
+		// Configure wake-up from STOP mode
+		PM_ConfigureKeyEXTI(true);
 
-	NVIC->ICPR[0] = 0xFFFFFFFF;
-	EXTI->PR = 0xFFFFFFFF;
+		NVIC->ICPR[0] = 0xFFFFFFFF;
+		EXTI->PR = 0xFFFFFFFF;
 
-	// Clear LPUART flags and flush RX buffer
-	LPUART1->ICR = USART_ICR_WUCF | USART_ICR_IDLECF | USART_ICR_ORECF |
-				   USART_ICR_NECF | USART_ICR_FECF | USART_ICR_PECF;
+		// Clear LPUART flags and flush RX buffer
+		LPUART1->ICR = USART_ICR_WUCF | USART_ICR_IDLECF | USART_ICR_ORECF |
+					   USART_ICR_NECF | USART_ICR_FECF | USART_ICR_PECF;
 
-	// Read and discard any pending LPUART data
-	while (LPUART1->ISR & USART_ISR_RXNE) {
-		volatile uint8_t dummy = LPUART1->RDR;
-		(void)dummy;
-	}
+		// Read and discard any pending LPUART data
+		while (LPUART1->ISR & USART_ISR_RXNE) {
+			volatile uint8_t dummy = LPUART1->RDR;
+			(void)dummy;
+		}
 
-    // Calculate timer period for IWDG feeding (LSI/128)
-    uint32_t lptim_period = (LSI_CLOCK_FREQ / 128) * IWDG_FEED_PERIOD_MS / 1000;
-    if (lptim_period > 0xFFFF) lptim_period = 0xFFFF;
+		// Calculate timer period for IWDG feeding (LSI/128)
+		uint32_t lptim_period = (LSI_CLOCK_FREQ / 128) * IWDG_FEED_PERIOD_MS / 1000;
+		if (lptim_period > 0xFFFF) lptim_period = 0xFFFF;
 
-    // Start LPTIM for periodic IWDG feeding
-    LPTIM1->ICR = LPTIM_ICR_ARRMCF;  // Clear any pending interrupts
-    LPTIM1->IER |= LPTIM_IER_ARRMIE; // Enable auto-reload match interrupt
-    LPTIM1->ARR = lptim_period;      // Set auto-reload value
-    LPTIM1->CR |= LPTIM_CR_CNTSTRT;  // Start counter
+		// Start LPTIM for periodic IWDG feeding
+		LPTIM1->ICR = LPTIM_ICR_ARRMCF;  // Clear any pending interrupts
+		LPTIM1->IER |= LPTIM_IER_ARRMIE; // Enable auto-reload match interrupt
+		LPTIM1->ARR = lptim_period;      // Set auto-reload value
+		LPTIM1->CR |= LPTIM_CR_CNTSTRT;  // Start counter
 
-    // Stop TIM3 (scanning timer)
-    TIM3->CR1 &= ~TIM_CR1_CEN;
+		// Stop TIM3 (scanning timer)
+		TIM3->CR1 &= ~TIM_CR1_CEN;
 
-    // Disable systick interrupt during STOP
-    SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
-
+		// Disable systick interrupt during STOP
+		SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
+    }
     // Enter STOP mode with regulator in main mode
     PWR->CR = (PWR->CR & ~PWR_CR_LPSDSR) | PWR_CR_CWUF;
     SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
@@ -228,35 +225,9 @@ static void PM_EnterStopMode(void) {
     SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
 
     // Re-enable systick
-    SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
+    if(lpm_backlight_off == false) SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
 }
 
-/**
- * @brief Exit STOP mode and restore system
- * @retval None
- */
-static void PM_ExitStopMode(void) {
-    // Stop LPTIM
-    LPTIM1->CR &= ~LPTIM_CR_CNTSTRT;
-    LPTIM1->IER &= ~LPTIM_IER_ARRMIE;
-
-    // Restart system clock to PLL (32 MHz)
-    SystemClock_Config();
-
-    // Restart TIM3 (scanning timer)
-    TIM3->CR1 |= TIM_CR1_CEN;
-
-    // Resume I2C peripherals
-	PM_ResumeI2C();
-
-    // Resume USB if connected
-    if (g_connection_mode == CONNECTION_USB) {
-    	USBD_Start(&hUsbDeviceFS);
-    }
-
-    // Disable EXTI for normal operation
-    PM_ConfigureKeyEXTI(false);
-}
 
 
 
@@ -273,7 +244,6 @@ void PM_EnterState(pm_state_t new_state) {
     if (new_state == PM_STATE_ACTIVE) {
         if (current_pm_state == PM_STATE_STOP) {
         	pmsm_mode = 0; // Active mode
-            PM_ExitStopMode();
         }
         current_pm_state = PM_STATE_ACTIVE;
     }
@@ -321,11 +291,29 @@ void PM_HandleWakeup(void) {
 		lpm_flag = true;
 	}
 
-    // The MCU has already woken from STOP mode when this interrupt fires
-    // Force active state if we were in STOP
+
+
     if (current_pm_state == PM_STATE_STOP) {
         current_pm_state = PM_STATE_ACTIVE;
-        PM_ExitStopMode();
+
+        LPTIM1->CR &= ~LPTIM_CR_CNTSTRT;
+        LPTIM1->IER &= ~LPTIM_IER_ARRMIE;
+
+        // Restart system clock to PLL (32 MHz)
+		SystemClock_Config();
+
+		// Restart TIM3 (scanning timer)
+		TIM3->CR1 |= TIM_CR1_CEN;
+
+		//Flag to enable backlight
+		g_effect.config.lpm_backlight_off = false;
+		g_effect.config.lpm_backlight_restore = true;
+		// Resume USB if connected
+		if (g_connection_mode == CONNECTION_USB) {
+			USBD_Start(&hUsbDeviceFS);
+		}
+		// Disable EXTI for normal operation
+		PM_ConfigureKeyEXTI(false);
     }
 }
 
@@ -354,7 +342,13 @@ void PM_Update(void) {
         }
     }
 
-    if (lpm_flag){
+    if(g_effect.config.lpm_backlight_off == false
+    		&& g_effect.config.lpm_backlight_restore == true){
+    		Effects_ExitLPM(g_connection_mode == CONNECTION_USB);
+    		g_effect.config.lpm_backlight_restore = false;
+    	}
+
+    if (lpm_flag == true){
     	bm70_error_t err = bm70_read_device_name(&g_bm70);
 		if (err != BM70_OK) {
 
