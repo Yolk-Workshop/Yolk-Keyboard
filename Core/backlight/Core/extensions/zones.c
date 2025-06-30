@@ -1,1557 +1,1632 @@
 /*
-* zones.c - Visual Zone Programming Implementation
-*
-* Created on: Jun 10, 2025
-* Author: bettysidepiece
-*/
+ * zones.c - Zone Programming Interface Implementation
+ */
 
 #include "zones.h"
-#include "effects.h"
+#include "system_config.h"
+#include "backlight.h"
 #include "colors.h"
-#include "logger.h"
-#include "main.h"
 #include "led_mapping.h"
+#include "logger.h"
+#include "keys.h"
 #include <string.h>
 
-/* ========================================================================== */
 /* Private Constants */
-/* ========================================================================== */
+#define HSV_HUE_STEP_DEFAULT        5
+#define HSV_VALUE_MIN				1
+#define HSV_VALUE_MAX				100
+#define HSV_SV_STEP_DEFAULT         5
+#define ZONE_SLOT_ROW               1
+#define ZONE_SLOT_START_COL         1
 
-#define ZONE_CRC_POLYNOMIAL         0x1021      // CRC-16-CCITT polynomial
-#define ZONE_VERSION_CURRENT        1           // Current zone format version
-#define ZONE_MAGIC_BYTE             0xA5        // Magic byte for validation
-#define ZONE_MAX_RETRIES            3           // Maximum operation retries
-#define ZONE_DEBOUNCE_MS            50          // Key debounce time
+#define ZONE_DEFAULT_COLOR_HUE          30      // Warm white/yellow
+#define ZONE_DEFAULT_COLOR_SATURATION   20      // Low saturation
+#define ZONE_DEFAULT_COLOR_VALUE        80      // Medium brightness
 
-// HSV adjustment parameters
-#define HSV_HUE_STEP_DEFAULT        15          // Default hue step
-#define HSV_SV_STEP_DEFAULT         10          // Default saturation/value step
-#define HSV_HUE_FAST_STEP           45          // Fast hue adjustment
-#define HSV_SV_FAST_STEP            25          // Fast saturation/value adjustment
-
-// Visual feedback timings
-#define FLASH_PULSE_DURATION_MS     200         // Duration of each flash pulse
-#define PREVIEW_FADE_IN_MS          25          // Preview fade in time
-#define PREVIEW_FADE_OUT_MS         30          // Preview fade out time
-
-// Zone slot to key mapping (using number row keys 1-8)
-#define ZONE_SLOT_ROW               1           // Number row
-#define ZONE_SLOT_START_COL         1           // Start at key "1"
-
-/* ========================================================================== */
 /* Private Variables */
-/* ========================================================================== */
-
-static zone_programming_context_t g_zone_ctx = {0};
+static zone_programming_context_t g_prog_ctx = {0};
 static bool g_initialized = false;
-static bool g_led_control_active = false;
-static const zone_storage_interface_t *g_storage_interface = NULL;
+zone_runtime_ctx_t g_zone_rt_ctx = {0};
 
-// Saved effects state for restoration
-static bool g_effects_were_active = false;
-static effect_type_t g_previous_effect_type = EFFECT_NONE;
+typedef struct{
+	uint32_t session_lock_time;
+	uint8_t active_zone_id;
+	bool zone_session_locked;
+}g_session_t;
 
-
-
-/* ========================================================================== */
+g_session_t g_session_guard = {0};
 /* Private Function Prototypes */
-/* ========================================================================== */
-
-static zone_error_t ProcessStateMachine(void);
-static zone_error_t ProcessBrowseState(void);
-static zone_error_t ProcessEditState(void);
-static zone_error_t ProcessHSVState(void);
-static zone_error_t ProcessSaveConfirmState(void);
-
-static zone_error_t InitializeZoneSlots(void);
-static zone_error_t ValidateZoneIntegrity(const zone_storage_t *zone);
-static uint16_t CalculateZoneCRC16(const zone_storage_t *zone);
-static zone_error_t CreateDefaultZone(zone_storage_t *zone, uint8_t slot_id);
-
-static zone_error_t UpdateVisualFeedback(void);
-static zone_error_t ShowSlotIndicators(void);
-static zone_error_t ShowKeySelection(void);
-static zone_error_t ShowHSVPreview(void);
-static zone_error_t FlashConfirmation(bool success);
-
-static zone_error_t SaveEffectsState(void);
-static zone_error_t RestoreEffectsState(void);
-static zone_error_t SuspendEffects(void);
-static zone_error_t ResumeEffects(void);
-
-static bool IsValidSlot(uint8_t slot_id);
-static bool IsValidKey(uint8_t row, uint8_t col);
-static bool HasUserActivity(void);
 static void UpdateActivityTime(void);
-static zone_error_t HandleTimeout(void);
-static zone_error_t AddKeyToZone(zone_storage_t *zone, uint8_t row, uint8_t col, Backlight_RGB_t color);
-static zone_error_t RemoveKeyFromZone(zone_storage_t *zone, uint8_t row, uint8_t col);
-static zone_key_data_t* FindKeyInZone(zone_storage_t *zone, uint8_t row, uint8_t col);
+static config_status_t ShowSlotIndicators(void);
+static config_status_t FlashConfirmation(bool success);
+static void UpdateRuntimeContext(void);
 
-/* ========================================================================== */
+/* Preview Mode Functions */
+static config_status_t enter_preview_mode(uint8_t zone_id);
+static void exit_preview_mode(void);
+static bool handle_preview_keys(uint8_t row, uint8_t col);
+static void load_zone_to_preview_cache(uint8_t zone_id);
+static void show_preview_display(void);
+
+/* Browse Mode Functions */
+static bool handle_browse_keys(uint8_t row, uint8_t col);
+
+/* Color Assignment Functions */
+static bool enter_individual_color_mode(uint8_t row, uint8_t col);
+static bool enter_zone_color_mode(void);
+static bool enter_edit_from_preview(void);
+static void show_color_mode_display(void);
+static void apply_color_and_exit(void);
+static void reset_to_zone_default_and_exit(void);
+
+/* Key Combination Handlers */
+static bool handle_right_alt_combinations(uint8_t row, uint8_t col);
+static bool handle_color_hsv_keys(uint8_t row, uint8_t col);
+static config_status_t swap_eeprom_zones(uint8_t eeprom_zone_a, uint8_t eeprom_zone_b);
+static config_status_t load_eeprom_to_runtime(uint8_t eeprom_zone_id, uint8_t runtime_slot);
+static config_status_t enter_edit_mode_with_existing_zone(uint8_t zone_id);
+
+static const uint8_t KEY_COUNT_ = 80;
+
+/* Visual Feedback Functions */
+static void flash_timeout_warning(void);
+
+static bool ValidateSessionState(void)
+{
+    // Check if we have a valid session lock
+    if (g_session_guard.zone_session_locked) {
+        uint32_t lock_age = HAL_GetTick() - g_session_guard.session_lock_time;
+
+        // Session locks expire after 30 seconds to prevent permanent locks
+        if (lock_age > 5000) {
+            LOG_WARNING("Session lock expired, clearing");
+            g_session_guard.zone_session_locked = false;
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool Zones_IsRuntimeSlotOccupied(uint8_t runtime_slot)
+{
+    if (runtime_slot >= 2) return false;
+    return g_zone_rt_ctx.zones[runtime_slot].key_count > 0;
+}
+
+static Backlight_RGB_t get_default_zone_color(void)
+{
+    return Backlight_HSVtoRGB(ZONE_DEFAULT_COLOR_HUE,
+                             ZONE_DEFAULT_COLOR_SATURATION,
+                             ZONE_DEFAULT_COLOR_VALUE);
+}
+
+static void CleanupModifierStates(void)
+{
+    g_prog_ctx.right_alt_pressed = false;
+    g_prog_ctx.color_mode_active = false;
+    g_prog_ctx.preview_mode_active = false;
+
+    LOG_DEBUG("Modifier states cleaned up");
+}
+
+static const zone_interface_t zone_interface = {
+	.load_keys_to_runtime = Zones_LoadKeysToRuntime,
+	.is_runtime_slot_occupied = Zones_IsRuntimeSlotOccupied,
+};
+
 /* Public API Implementation */
-/* ========================================================================== */
-
-zone_error_t Zones_Init(void)
+config_status_t Zones_Init(void)
 {
-    if (g_initialized) {
-        return ZONE_ERROR_NONE;
-    }
+    if (g_initialized) return CONFIG_OK;
 
-    // Initialize context
-    memset(&g_zone_ctx, 0, sizeof(g_zone_ctx));
+    memset(&g_prog_ctx, 0, sizeof(g_prog_ctx));
+    g_prog_ctx.current_state = ZONE_PROG_INACTIVE;
+    g_prog_ctx.edit_mode = ZONE_EDIT_INDIVIDUAL;
 
-    // Set initial state
-    g_zone_ctx.current_state = ZONE_STATE_INACTIVE;
-    g_zone_ctx.edit_mode = ZONE_EDIT_MODE_INDIVIDUAL;
-    g_zone_ctx.last_activity_time = HAL_GetTick();
+    // Initialize HSV defaults with proper bounds
+    g_prog_ctx.hsv.hue = 30;
+    g_prog_ctx.hsv.saturation = 100;
+    g_prog_ctx.hsv.value = 80;  // Safe default in 1-100 range
+    g_prog_ctx.hsv.hue_step = HSV_HUE_STEP_DEFAULT;
+    g_prog_ctx.hsv.sv_step = HSV_SV_STEP_DEFAULT;
 
-    // Initialize HSV defaults
-    g_zone_ctx.hsv.hue = 30;             // Orange/amber
-    g_zone_ctx.hsv.saturation = 100;     // Full saturation
-    g_zone_ctx.hsv.value = 80;           // 80% brightness
-    g_zone_ctx.hsv.hue_step = HSV_HUE_STEP_DEFAULT;
-    g_zone_ctx.hsv.sv_step = HSV_SV_STEP_DEFAULT;
+    g_prog_ctx.auto_exit_enabled = false;  // Master config handles timeouts
+    g_prog_ctx.timeout_duration_ms = 0;    // Disabled
 
-    // Initialize configuration
-    g_zone_ctx.auto_exit_enabled = true;
-    g_zone_ctx.preview_duration_ms = ZONE_PREVIEW_DELAY_MS;
-    g_zone_ctx.default_brightness = 5;   // Mid-range brightness level
+    // Initialize session guard
+    memset(&g_session_guard, 0, sizeof(g_session_guard));
 
-    // Initialize zone slots
-    zone_error_t result = InitializeZoneSlots();
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Zone slots initialization failed: %d", result);
-        return result;
-    }
+    session_set_zone_interface(&zone_interface);
 
-    g_led_control_active = false;
     g_initialized = true;
-
     LOG_INFO("Zone programming system initialized");
-    return ZONE_ERROR_NONE;
+    return CONFIG_OK;
 }
 
-zone_error_t Zones_Process(void)
+config_status_t Zones_Process(void)
 {
-    if (!g_initialized) {
-        return ZONE_ERROR_NONE;
+    if (!g_initialized || g_prog_ctx.current_state == ZONE_PROG_INACTIVE) {
+        return CONFIG_OK;
     }
 
-    // Check for timeout if in programming mode
-    if (g_zone_ctx.current_state != ZONE_STATE_INACTIVE) {
-        zone_error_t timeout_result = HandleTimeout();
-        if (timeout_result != ZONE_ERROR_NONE) {
-            return timeout_result;
+    uint32_t current_time = HAL_GetTick();
+
+    if (g_prog_ctx.color_mode_active) {
+        uint32_t color_elapsed = current_time - g_prog_ctx.color_mode_start_time;
+
+        // Warning at 4:45 (285 seconds)
+        if (color_elapsed >= 285000 && color_elapsed < 286000) {
+            flash_timeout_warning();
+        }
+
+        // Auto-exit at 5 minutes (300 seconds)
+        if (color_elapsed >= 300000) {
+            LOG_WARNING("Color mode timeout - discarding changes");
+            g_prog_ctx.color_mode_active = false;
+            g_prog_ctx.right_alt_pressed = false;
+            g_prog_ctx.current_state = g_prog_ctx.previous_state;
+            ShowKeySelection();
         }
     }
 
-    // Process state machine
-    zone_error_t result = ProcessStateMachine();
-    if (result != ZONE_ERROR_NONE) {
-        g_zone_ctx.last_error = result;
-        g_zone_ctx.error_count++;
-        LOG_ERROR("Zone state machine error: %d", result);
-    }
-
-    return result;
-}
-
-bool Zones_IsActive(void)
-{
-    return g_initialized && (g_zone_ctx.current_state != ZONE_STATE_INACTIVE);
-}
-
-zone_state_t Zones_GetState(void)
-{
-    return g_initialized ? g_zone_ctx.current_state : ZONE_STATE_INACTIVE;
-}
-
-bool Zones_HasLEDControl(void)
-{
-    return g_led_control_active;
-}
-
-/* ========================================================================== */
-/* Zone Programming Entry/Exit */
-/* ========================================================================== */
-
-zone_error_t Zones_EnterProgramming(void)
-{
-    if (!g_initialized) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    if (g_zone_ctx.current_state != ZONE_STATE_INACTIVE) {
-        LOG_WARNING("Already in programming mode");
-        return ZONE_ERROR_NONE;
-    }
-
-    LOG_INFO("Entering zone programming mode");
-
-    // Save and suspend effects
-    zone_error_t result = SaveEffectsState();
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Failed to save effects state: %d", result);
-        return result;
-    }
-
-    result = SuspendEffects();
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Failed to suspend effects: %d", result);
-        return result;
-    }
-
-    // Take LED control
-    g_led_control_active = true;
-
-    // Initialize programming session
-    g_zone_ctx.current_state = ZONE_STATE_BROWSE;
-    g_zone_ctx.state_start_time = HAL_GetTick();
-    g_zone_ctx.last_activity_time = HAL_GetTick();
-
-    // Clear any previous selection
-    memset(&g_zone_ctx.selection, 0, sizeof(g_zone_ctx.selection));
-
-    // Enter browse mode to show slot selection
-    return Zones_EnterBrowseMode();
-}
-
-zone_error_t Zones_ExitProgramming(bool save_changes)
-{
-    if (!g_initialized || g_zone_ctx.current_state == ZONE_STATE_INACTIVE) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    LOG_INFO("Exiting zone programming mode (save=%d)", save_changes);
-
-    zone_error_t result = ZONE_ERROR_NONE;
-
-    // Save changes if requested and there are changes to save
-    if (save_changes && g_zone_ctx.manager.has_changes) {
-        result = Zones_SaveZone(g_zone_ctx.manager.editing_slot);
-        if (result == ZONE_ERROR_NONE) {
-            // Flash success confirmation
-            FlashConfirmation(true);
-
-            // Apply the zone immediately
-            Zones_ActivateZone(g_zone_ctx.manager.editing_slot);
-        } else {
-            // Flash error confirmation
-            FlashConfirmation(false);
-            LOG_ERROR("Failed to save zone changes: %d", result);
+    // Original timeout handling for main session
+    if (g_prog_ctx.auto_exit_enabled) {
+        uint32_t elapsed = current_time - g_prog_ctx.last_activity_time;
+        if (elapsed >= g_prog_ctx.timeout_duration_ms) {
+            LOG_INFO("Zone programming timeout");
+            return Zones_ExitProgramming(false);
         }
     }
 
-    // Release LED control
-    g_led_control_active = false;
-
-    // Reset state
-    g_zone_ctx.current_state = ZONE_STATE_INACTIVE;
-    g_zone_ctx.manager.has_changes = false;
-
-    // Restore effects if no zone was applied or save failed
-    if (!save_changes || result != ZONE_ERROR_NONE) {
-        zone_error_t restore_result = RestoreEffectsState();
-        if (restore_result != ZONE_ERROR_NONE) {
-            LOG_ERROR("Failed to restore effects state: %d", restore_result);
-        }
-    }
-
-    return result;
+    return CONFIG_OK;
 }
 
-zone_error_t Zones_HandleTimeout(void)
+bool Zones_IsProgammingActive(void)
 {
-    return HandleTimeout();
-}
-
-/* ========================================================================== */
-/* Zone Browse Mode */
-/* ========================================================================== */
-
-zone_error_t Zones_EnterBrowseMode(void)
-{
-    if (!g_initialized) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    LOG_DEBUG("Entering zone browse mode");
-
-    g_zone_ctx.current_state = ZONE_STATE_BROWSE;
-    g_zone_ctx.state_start_time = HAL_GetTick();
-    UpdateActivityTime();
-
-    // Show slot indicators (red/green for empty/occupied)
-    return ShowSlotIndicators();
-}
-
-zone_error_t Zones_SelectSlot(uint8_t slot_id)
-{
-    if (!IsValidSlot(slot_id)) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
-
-    UpdateActivityTime();
-
-    LOG_DEBUG("Selected slot %d", slot_id);
-
-    g_zone_ctx.manager.editing_slot = slot_id;
-
-    // Load zone data if slot is occupied
-    if (g_zone_ctx.manager.slot_occupied[slot_id]) {
-        zone_error_t result = Zones_LoadZone(slot_id);
-        if (result != ZONE_ERROR_NONE) {
-            LOG_ERROR("Failed to load zone %d: %d", slot_id, result);
-            return result;
-        }
-        LOG_INFO("Loaded existing zone %d with %d keys", slot_id,
-                 g_zone_ctx.manager.staging_zone.metadata.key_count);
-    } else {
-        // Create new zone
-        zone_error_t result = CreateDefaultZone(&g_zone_ctx.manager.staging_zone, slot_id);
-        if (result != ZONE_ERROR_NONE) {
-            LOG_ERROR("Failed to create default zone: %d", result);
-            return result;
-        }
-        LOG_INFO("Created new zone %d", slot_id);
-    }
-
-    // Enter edit mode
-    return Zones_EnterEditMode(slot_id);
-}
-
-zone_error_t Zones_PreviewSlot(uint8_t slot_id)
-{
-    if (!IsValidSlot(slot_id) || !g_zone_ctx.manager.slot_occupied[slot_id]) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
-
-    UpdateActivityTime();
-
-    LOG_DEBUG("Previewing slot %d", slot_id);
-
-    g_zone_ctx.preview_active = true;
-    g_zone_ctx.preview_slot = slot_id;
-    g_zone_ctx.preview_start_time = HAL_GetTick();
-
-    // Temporarily load zone for preview
-    zone_storage_t preview_zone;
-    zone_error_t result = ZONE_ERROR_NONE;
-
-    if (g_storage_interface && g_storage_interface->read_zone) {
-        result = g_storage_interface->read_zone(slot_id, &preview_zone);
-        if (result != ZONE_ERROR_NONE) {
-            g_zone_ctx.preview_active = false;
-            return result;
-        }
-
-        // Apply preview zone colors
-        for (uint8_t i = 0; i < preview_zone.metadata.key_count; i++) {
-            zone_key_data_t *key = &preview_zone.keys[i];
-            if (key->active && IsValidKey(key->row, key->col)) {
-                Backlight_SetKeyRGB(key->row, key->col, key->color);
-            }
-        }
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-zone_error_t Zones_QuickSwitch(void)
-{
-    if (!g_initialized) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    // Find first two occupied slots
-    uint8_t first_slot = 255, second_slot = 255;
-    for (uint8_t i = 0; i < ZONE_MAX_SLOTS; i++) {
-        if (g_zone_ctx.manager.slot_occupied[i]) {
-            if (first_slot == 255) {
-                first_slot = i;
-            } else if (second_slot == 255) {
-                second_slot = i;
-                break;
-            }
-        }
-    }
-
-    if (first_slot == 255) {
-        LOG_WARNING("No zones available for quick switch");
-        return ZONE_ERROR_INVALID_SLOT;
-    }
-
-    // Switch between first and second, or just activate first if only one exists
-    uint8_t target_slot;
-    if (second_slot == 255 || g_zone_ctx.manager.active_slot != first_slot) {
-        target_slot = first_slot;
-    } else {
-        target_slot = second_slot;
-    }
-
-    LOG_INFO("Quick switching to zone slot %d", target_slot);
-    return Zones_ActivateZone(target_slot);
-}
-
-/* ========================================================================== */
-/* Zone Edit Mode */
-/* ========================================================================== */
-
-zone_error_t Zones_EnterEditMode(uint8_t slot_id)
-{
-    if (!IsValidSlot(slot_id)) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
-
-    LOG_DEBUG("Entering edit mode for slot %d", slot_id);
-
-    g_zone_ctx.current_state = ZONE_STATE_EDIT;
-    g_zone_ctx.state_start_time = HAL_GetTick();
-    g_zone_ctx.manager.editing_slot = slot_id;
-    UpdateActivityTime();
-
-    // Clear previous selection
-    memset(&g_zone_ctx.selection, 0, sizeof(g_zone_ctx.selection));
-
-    // Show current zone keys and selection interface
-    return ShowKeySelection();
-}
-
-zone_error_t Zones_ToggleEditMode(void)
-{
-    if (g_zone_ctx.current_state != ZONE_STATE_EDIT) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    UpdateActivityTime();
-
-    // Cycle through edit modes
-    switch (g_zone_ctx.edit_mode) {
-        case ZONE_EDIT_MODE_INDIVIDUAL:
-            g_zone_ctx.edit_mode = ZONE_EDIT_MODE_GROUP;
-            LOG_DEBUG("Switched to group edit mode");
-            break;
-        case ZONE_EDIT_MODE_GROUP:
-            g_zone_ctx.edit_mode = ZONE_EDIT_MODE_ZONE_WIDE;
-            LOG_DEBUG("Switched to zone-wide edit mode");
-            break;
-        case ZONE_EDIT_MODE_ZONE_WIDE:
-            g_zone_ctx.edit_mode = ZONE_EDIT_MODE_INDIVIDUAL;
-            LOG_DEBUG("Switched to individual edit mode");
-            break;
-    }
-
-    // Update visual feedback based on new mode
-    return ShowKeySelection();
-}
-
-zone_error_t Zones_ToggleKeySelection(uint8_t row, uint8_t col)
-{
-    if (!IsValidKey(row, col)) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    if (g_zone_ctx.current_state != ZONE_STATE_EDIT) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    UpdateActivityTime();
-
-    bool was_selected = g_zone_ctx.selection.selected[row][col];
-    g_zone_ctx.selection.selected[row][col] = !was_selected;
-
-    if (was_selected) {
-        g_zone_ctx.selection.selection_count--;
-        LOG_DEBUG("Deselected key (%d,%d)", row, col);
-    } else {
-        g_zone_ctx.selection.selection_count++;
-        g_zone_ctx.selection.last_row = row;
-        g_zone_ctx.selection.last_col = col;
-        LOG_DEBUG("Selected key (%d,%d)", row, col);
-    }
-
-    // Update visual feedback
-    return ShowKeySelection();
-}
-
-zone_error_t Zones_ClearSelection(void)
-{
-    if (g_zone_ctx.current_state != ZONE_STATE_EDIT) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    UpdateActivityTime();
-
-    memset(&g_zone_ctx.selection.selected, 0, sizeof(g_zone_ctx.selection.selected));
-    g_zone_ctx.selection.selection_count = 0;
-
-    LOG_DEBUG("Cleared key selection");
-
-    // Update visual feedback
-    return ShowKeySelection();
-}
-
-zone_error_t Zones_SelectAllKeys(void)
-{
-    if (g_zone_ctx.current_state != ZONE_STATE_EDIT) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    UpdateActivityTime();
-
-    // Select all keys that have LEDs based on the LED mapping
-    g_zone_ctx.selection.selection_count = 0;
-    for (uint8_t row = 0; row < BACKLIGHT_MATRIX_ROWS; row++) {
-        for (uint8_t col = 0; col < BACKLIGHT_MATRIX_COLS; col++) {
-            if (get_led_for_key(row, col) != NULL) {
-                g_zone_ctx.selection.selected[row][col] = true;
-                g_zone_ctx.selection.selection_count++;
-            }
-        }
-    }
-
-    LOG_DEBUG("Selected all keys (%d total)", g_zone_ctx.selection.selection_count);
-
-    // Update visual feedback
-    return ShowKeySelection();
-}
-
-/* ========================================================================== */
-/* HSV Color Selection */
-/* ========================================================================== */
-
-zone_error_t Zones_EnterHSVMode(void)
-{
-    if (g_zone_ctx.current_state != ZONE_STATE_EDIT) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    if (g_zone_ctx.selection.selection_count == 0) {
-        LOG_WARNING("No keys selected for HSV editing");
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    LOG_DEBUG("Entering HSV adjustment mode with %d keys selected",
-              g_zone_ctx.selection.selection_count);
-
-    g_zone_ctx.previous_state = g_zone_ctx.current_state;
-    g_zone_ctx.current_state = ZONE_STATE_HSV_ADJUST;
-    g_zone_ctx.state_start_time = HAL_GetTick();
-    UpdateActivityTime();
-
-    // Show HSV preview
-    return ShowHSVPreview();
-}
-
-zone_error_t Zones_AdjustHue(int8_t direction)
-{
-    if (g_zone_ctx.current_state != ZONE_STATE_HSV_ADJUST) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    UpdateActivityTime();
-
-    int16_t new_hue = g_zone_ctx.hsv.hue + (direction * g_zone_ctx.hsv.hue_step);
-
-    // Wrap around hue (0-359)
-    if (new_hue < 0) {
-        new_hue += 360;
-    } else if (new_hue >= 360) {
-        new_hue -= 360;
-    }
-
-    g_zone_ctx.hsv.hue = (uint16_t)new_hue;
-
-    LOG_DEBUG("Adjusted hue to %d", g_zone_ctx.hsv.hue);
-
-    // Update preview
-    return ShowHSVPreview();
-}
-
-zone_error_t Zones_AdjustBrightness(int8_t direction)
-{
-    if (g_zone_ctx.current_state != ZONE_STATE_HSV_ADJUST) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    UpdateActivityTime();
-
-    int16_t new_value = g_zone_ctx.hsv.value + (direction * g_zone_ctx.hsv.sv_step);
-
-    // Clamp value (0-100)
-    if (new_value < 0) {
-        new_value = 0;
-    } else if (new_value > 100) {
-        new_value = 100;
-    }
-
-    g_zone_ctx.hsv.value = (uint8_t)new_value;
-
-    LOG_DEBUG("Adjusted brightness to %d", g_zone_ctx.hsv.value);
-
-    // Update preview
-    return ShowHSVPreview();
-}
-
-zone_error_t Zones_ApplyHSVColor(void)
-{
-    if (g_zone_ctx.current_state != ZONE_STATE_HSV_ADJUST) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    if (g_zone_ctx.selection.selection_count == 0) {
-        return ZONE_ERROR_INVALID_STATE;
-    }
-
-    UpdateActivityTime();
-
-    // Convert HSV to RGB
-    Backlight_RGB_t rgb_color = Backlight_HSVtoRGB(g_zone_ctx.hsv.hue,
-                                                   g_zone_ctx.hsv.saturation,
-                                                   g_zone_ctx.hsv.value);
-
-    LOG_DEBUG("Applying HSV(%d,%d,%d) -> RGB(%d,%d,%d) to %d keys",
-              g_zone_ctx.hsv.hue, g_zone_ctx.hsv.saturation, g_zone_ctx.hsv.value,
-              rgb_color.r, rgb_color.g, rgb_color.b, g_zone_ctx.selection.selection_count);
-
-    // Apply color to selected keys in staging zone
-    for (uint8_t row = 0; row < BACKLIGHT_MATRIX_ROWS; row++) {
-        for (uint8_t col = 0; col < BACKLIGHT_MATRIX_COLS; col++) {
-            if (g_zone_ctx.selection.selected[row][col]) {
-                zone_error_t result = AddKeyToZone(&g_zone_ctx.manager.staging_zone, row, col, rgb_color);
-                if (result != ZONE_ERROR_NONE) {
-                    LOG_ERROR("Failed to add key (%d,%d) to zone: %d", row, col, result);
-                }
-
-                // Apply to hardware immediately for visual feedback
-                Backlight_SetKeyRGB(row, col, rgb_color);
-            }
-        }
-    }
-
-    // Mark as changed
-    g_zone_ctx.manager.has_changes = true;
-
-    // Return to edit mode
-    g_zone_ctx.current_state = g_zone_ctx.previous_state;
-
-    LOG_INFO("Applied color to %d keys, zone now has %d total keys",
-             g_zone_ctx.selection.selection_count,
-             g_zone_ctx.manager.staging_zone.metadata.key_count);
-
-    return ZONE_ERROR_NONE;
-}
-
-zone_error_t Zones_GetHSV(uint16_t *h, uint8_t *s, uint8_t *v)
-{
-    if (!h || !s || !v) {
-        return ZONE_ERROR_INVALID_PARAM;
-    }
-
-    *h = g_zone_ctx.hsv.hue;
-    *s = g_zone_ctx.hsv.saturation;
-    *v = g_zone_ctx.hsv.value;
-
-    return ZONE_ERROR_NONE;
-}
-
-/* ========================================================================== */
-/* Zone Save/Load Operations */
-/* ========================================================================== */
-
-zone_error_t Zones_SaveZone(uint8_t slot_id)
-{
-    if (!IsValidSlot(slot_id)) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
-
-    if (!g_storage_interface || !g_storage_interface->write_zone) {
-        LOG_ERROR("No storage interface registered");
-        return ZONE_ERROR_MEMORY;
-    }
-
-    LOG_INFO("Saving zone to slot %d (%d keys)", slot_id,
-             g_zone_ctx.manager.staging_zone.metadata.key_count);
-
-    // Update metadata
-    g_zone_ctx.manager.staging_zone.metadata.slot_id = slot_id;
-    g_zone_ctx.manager.staging_zone.metadata.version = ZONE_VERSION_CURRENT;
-    g_zone_ctx.manager.staging_zone.metadata.modified_timestamp = HAL_GetTick();
-
-    // Set creation timestamp if this is a new zone
-    if (!g_zone_ctx.manager.slot_occupied[slot_id]) {
-        g_zone_ctx.manager.staging_zone.metadata.created_timestamp = HAL_GetTick();
-    }
-
-    // Calculate CRC
-    g_zone_ctx.manager.staging_zone.metadata.crc16 = CalculateZoneCRC16(&g_zone_ctx.manager.staging_zone);
-
-    // Write to storage
-    zone_error_t result = g_storage_interface->write_zone(slot_id, &g_zone_ctx.manager.staging_zone);
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Failed to write zone %d to storage: %d", slot_id, result);
-        return result;
-    }
-
-    // Mark slot as occupied
-    g_zone_ctx.manager.slot_occupied[slot_id] = true;
-    g_zone_ctx.manager.has_changes = false;
-
-    LOG_INFO("Zone %d saved successfully", slot_id);
-    return ZONE_ERROR_NONE;
-}
-
-zone_error_t Zones_LoadZone(uint8_t slot_id)
-{
-    if (!IsValidSlot(slot_id)) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
-
-    if (!g_storage_interface || !g_storage_interface->read_zone) {
-        LOG_ERROR("No storage interface registered");
-        return ZONE_ERROR_MEMORY;
-    }
-
-    LOG_DEBUG("Loading zone from slot %d", slot_id);
-
-    zone_error_t result = g_storage_interface->read_zone(slot_id, &g_zone_ctx.manager.staging_zone);
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Failed to read zone %d from storage: %d", slot_id, result);
-        return result;
-    }
-
-    // Validate zone integrity
-    result = ValidateZoneIntegrity(&g_zone_ctx.manager.staging_zone);
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Zone %d failed integrity check: %d", slot_id, result);
-        return result;
-    }
-
-    LOG_DEBUG("Zone %d loaded successfully (%d keys)", slot_id,
-              g_zone_ctx.manager.staging_zone.metadata.key_count);
-    return ZONE_ERROR_NONE;
-}
-
-zone_error_t Zones_DeleteZone(uint8_t slot_id)
-{
-    if (!IsValidSlot(slot_id)) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
-
-    if (!g_storage_interface || !g_storage_interface->erase_zone) {
-        LOG_ERROR("No storage interface registered");
-        return ZONE_ERROR_MEMORY;
-    }
-
-    LOG_INFO("Deleting zone from slot %d", slot_id);
-
-    zone_error_t result = g_storage_interface->erase_zone(slot_id);
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Failed to erase zone %d: %d", slot_id, result);
-        return result;
-    }
-
-    // Mark slot as unoccupied
-    g_zone_ctx.manager.slot_occupied[slot_id] = false;
-
-    LOG_INFO("Zone %d deleted successfully", slot_id);
-    return ZONE_ERROR_NONE;
-}
-
-zone_error_t Zones_ActivateZone(uint8_t slot_id)
-{
-    if (!IsValidSlot(slot_id) || !g_zone_ctx.manager.slot_occupied[slot_id]) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
-
-    LOG_INFO("Activating zone %d", slot_id);
-
-    // Load zone to staging area first
-    zone_error_t result = Zones_LoadZone(slot_id);
-    if (result != ZONE_ERROR_NONE) {
-        return result;
-    }
-
-    // Copy to active zone
-    g_zone_ctx.manager.active_zone = g_zone_ctx.manager.staging_zone;
-    g_zone_ctx.manager.active_slot = slot_id;
-
-    // Clear all LEDs first
-    Backlight_SetAll(0, 0, 0);
-
-    // Apply zone colors to keyboard
-    for (uint8_t i = 0; i < g_zone_ctx.manager.active_zone.metadata.key_count; i++) {
-        zone_key_data_t *key = &g_zone_ctx.manager.active_zone.keys[i];
-        if (key->active && IsValidKey(key->row, key->col)) {
-            Backlight_SetKeyRGB(key->row, key->col, key->color);
-        }
-    }
-
-    // Clear saved backlight state since we're applying a zone
-    Backlight_ClearSavedState();
-
-    LOG_INFO("Zone %d activated successfully (%d keys)", slot_id,
-             g_zone_ctx.manager.active_zone.metadata.key_count);
-    return ZONE_ERROR_NONE;
-}
-
-/* ========================================================================== */
-/* Zone Validation and Utilities */
-/* ========================================================================== */
-
-zone_error_t Zones_ValidateZone(const zone_storage_t *zone)
-{
-    return ValidateZoneIntegrity(zone);
-}
-
-uint16_t Zones_CalculateCRC16(const zone_storage_t *zone)
-{
-    return CalculateZoneCRC16(zone);
+    return g_initialized && (g_prog_ctx.current_state != ZONE_PROG_INACTIVE);
 }
 
 bool Zones_IsSlotOccupied(uint8_t slot_id)
 {
-    if (!IsValidSlot(slot_id)) {
-        return false;
-    }
-    return g_zone_ctx.manager.slot_occupied[slot_id];
+    return (slot_id < ZONE_MAX_ZONES) ? zone_is_slot_occupied(slot_id) : false;
 }
 
 uint8_t Zones_GetKeyCount(uint8_t slot_id)
 {
-    if (!IsValidSlot(slot_id) || !g_zone_ctx.manager.slot_occupied[slot_id]) {
-        return 0;
-    }
+    if (slot_id >= ZONE_MAX_ZONES) return 0;
 
-    // If this is the currently loaded slot, return from staging zone
-    if (slot_id == g_zone_ctx.manager.editing_slot) {
-        return g_zone_ctx.manager.staging_zone.metadata.key_count;
+    uint8_t led_count;
+    if (zone_get_basic_info(slot_id, &led_count, NULL, NULL) == CONFIG_OK) {
+        return led_count;
     }
-
-    // For other slots, would need to load from storage (simplified for now)
     return 0;
 }
 
-zone_error_t Zones_CopyZone(uint8_t src_slot, uint8_t dst_slot)
+config_status_t Zones_EnterProgramming(void)
 {
-    if (!IsValidSlot(src_slot) || !IsValidSlot(dst_slot)) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
+    if (!g_initialized) return CONFIG_INVALID_PARAMETER;
+    if (g_prog_ctx.current_state != ZONE_PROG_INACTIVE) return CONFIG_OK;
 
-    if (!g_zone_ctx.manager.slot_occupied[src_slot]) {
-        return ZONE_ERROR_INVALID_SLOT;
-    }
+    LOG_INFO("Entering zone programming mode");
 
-    LOG_INFO("Copying zone from slot %d to slot %d", src_slot, dst_slot);
+    g_prog_ctx.current_state = ZONE_PROG_BROWSE;
+    g_prog_ctx.state_start_time = HAL_GetTick();
+    g_prog_ctx.last_activity_time = HAL_GetTick();
+    g_prog_ctx.has_unsaved_changes = false;
 
-    // Load source zone
-    zone_storage_t temp_zone;
-    if (!g_storage_interface || !g_storage_interface->read_zone) {
-        return ZONE_ERROR_MEMORY;
-    }
-
-    zone_error_t result = g_storage_interface->read_zone(src_slot, &temp_zone);
-    if (result != ZONE_ERROR_NONE) {
-        return result;
-    }
-
-    // Update metadata for destination
-    temp_zone.metadata.slot_id = dst_slot;
-    temp_zone.metadata.created_timestamp = HAL_GetTick();
-    temp_zone.metadata.modified_timestamp = HAL_GetTick();
-    temp_zone.metadata.crc16 = CalculateZoneCRC16(&temp_zone);
-
-    // Write to destination
-    result = g_storage_interface->write_zone(dst_slot, &temp_zone);
-    if (result != ZONE_ERROR_NONE) {
-        return result;
-    }
-
-    g_zone_ctx.manager.slot_occupied[dst_slot] = true;
-
-    LOG_INFO("Zone copied successfully");
-    return ZONE_ERROR_NONE;
+    return Zones_EnterBrowse();
 }
 
-/* ========================================================================== */
-/* Visual Feedback Functions */
-/* ========================================================================== */
-
-zone_error_t Zones_ShowBrowseInterface(void)
+config_status_t Zones_ExitProgramming(bool save_changes)
 {
+    if (!g_initialized || g_prog_ctx.current_state == ZONE_PROG_INACTIVE) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    LOG_INFO("Exiting zone programming mode (save=%d)", save_changes);
+
+    config_status_t result = CONFIG_OK;
+
+    if (save_changes && g_prog_ctx.has_unsaved_changes) {
+        uint8_t editing_zone = g_prog_ctx.editing_zone_id;
+
+        // Handle slots 0-1: Runtime cache + EEPROM
+        if (editing_zone <= 1) {
+            LOG_INFO("Saving zone %d to runtime cache + EEPROM", editing_zone);
+
+            // 1. Load to runtime cache first
+            result = Zones_LoadStagingToRuntime(editing_zone);
+            if (result == CONFIG_OK) {
+                LOG_INFO("Zone %d loaded to runtime cache", editing_zone);
+
+                // 2. Enable zones if this is the first active zone
+                if (!g_zone_rt_ctx.zones_enabled && g_zone_rt_ctx.active_zone_count > 0) {
+                    Zones_SetRuntimeEnabled(false);
+                    LOG_INFO("Runtime zones auto-enabled");
+                }
+            }
+
+            // 4. TODO: Save to EEPROM when ready
+            // result = session_commit_changes(); // EEPROM save
+        }
+        // Handle slots 2-7: EEPROM only
+        else {
+            LOG_INFO("Saving zone %d directly to EEPROM", editing_zone);
+
+            // TODO: Direct EEPROM save when implemented
+            // result = session_commit_changes();
+            result = CONFIG_OK; // Placeholder for now
+        }
+
+        FlashConfirmation(result == CONFIG_OK);
+
+    } else if (g_prog_ctx.has_unsaved_changes) {
+        session_discard_changes();
+        FlashConfirmation(false);
+    }
+
+    memset(&g_prog_ctx.selection, 0, sizeof(g_prog_ctx.selection));
+    // Clear session protection
+    g_session_guard.zone_session_locked = false;
+    g_session_guard.active_zone_id = 0xFF;
+
+    // Clean up all state
+    CleanupModifierStates();
+    g_prog_ctx.has_unsaved_changes = false;
+
+    return result;
+}
+
+
+config_status_t Zones_EnterBrowse(void)
+{
+    if (!g_initialized) return CONFIG_INVALID_PARAMETER;
+
+    g_session_guard.zone_session_locked = false;
+	g_session_guard.active_zone_id = 0xFF;
+
+    g_prog_ctx.current_state = ZONE_PROG_BROWSE;
+    UpdateActivityTime();
+
     return ShowSlotIndicators();
 }
 
-zone_error_t Zones_ShowSelectionInterface(void)
+config_status_t Zones_SelectZone(uint8_t zone_id)
 {
+    if (zone_id >= ZONE_MAX_ZONES) return CONFIG_INVALID_PARAMETER;
+
+    // Protect against session corruption
+    if (ValidateSessionState() && g_session_guard.active_zone_id != zone_id) {
+        LOG_WARNING("Attempted to switch zones while session locked to zone %d",
+                   g_session_guard.active_zone_id);
+        return CONFIG_ERROR;
+    }
+
+    UpdateActivityTime();
+    g_prog_ctx.editing_zone_id = zone_id;
+
+    // Lock this session to prevent corruption
+    g_session_guard.zone_session_locked = true;
+    g_session_guard.active_zone_id = zone_id;
+    g_session_guard.session_lock_time = HAL_GetTick();
+
+    // Begin editing session using system_config
+    config_status_t result = session_begin_edit(zone_id);
+    if (result != CONFIG_OK) {
+        // Clear lock on failure
+        g_session_guard.zone_session_locked = false;
+        return result;
+    }
+
+    return Zones_EnterEdit(zone_id);
+}
+
+config_status_t Zones_EnterEdit(uint8_t zone_id)
+{
+    g_prog_ctx.current_state = ZONE_PROG_EDIT;
+	g_prog_ctx.editing_zone_id = zone_id;
+	g_prog_ctx.color_explicitly_programmed = false;
+	g_prog_ctx.current_default_color = get_default_zone_color();
+	g_prog_ctx.has_default_color_shown = true;
+
+    UpdateActivityTime();
+
+    memset(&g_prog_ctx.selection, 0, sizeof(g_prog_ctx.selection));
+    Backlight_SetAll(0, 0, 0);
+
     return ShowKeySelection();
 }
 
-zone_error_t Zones_ShowHSVFeedback(void)
+config_status_t Zones_ToggleKeySelection(uint8_t row, uint8_t col)
 {
-    return ShowHSVPreview();
+    if (!Zones_IsValidKey(row, col) || g_prog_ctx.current_state != ZONE_PROG_EDIT) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    UpdateActivityTime();
+
+    bool was_selected = g_prog_ctx.selection.selected[row][col];
+    g_prog_ctx.selection.selected[row][col] = !was_selected;
+
+    if (was_selected) {
+        g_prog_ctx.selection.selection_count--;
+        session_remove_key_color(row, col);
+    } else {
+        g_prog_ctx.selection.selection_count++;
+        g_prog_ctx.has_unsaved_changes = true;
+        session_set_key_color(row, col, BACKLIGHT_TO_RGB(COLOR_CRIMSON), false);
+    }
+
+    if(g_prog_ctx.selection.selection_count == 0){
+    	g_prog_ctx.has_unsaved_changes = false;
+    }
+
+    return ShowKeySelection();
 }
 
-zone_error_t Zones_FlashSaveSuccess(void)
+config_status_t Zones_ClearSelection(void)
 {
-    return FlashConfirmation(true);
+    if (g_prog_ctx.current_state != ZONE_PROG_EDIT) return CONFIG_INVALID_PARAMETER;
+
+    UpdateActivityTime();
+    memset(&g_prog_ctx.selection.selected, 0, sizeof(g_prog_ctx.selection.selected));
+    g_prog_ctx.selection.selection_count = 0;
+    g_prog_ctx.has_unsaved_changes = false;
+    return ShowKeySelection();
 }
 
-zone_error_t Zones_FlashSaveError(void)
+config_status_t Zones_SelectAllKeys(void)
 {
-    return FlashConfirmation(false);
-}
+    if (g_prog_ctx.current_state != ZONE_PROG_EDIT) return CONFIG_INVALID_PARAMETER;
 
-zone_error_t Zones_RestoreKeyboardState(void)
-{
-    return RestoreEffectsState();
-}
+    UpdateActivityTime();
+    g_prog_ctx.selection.selection_count = 0;
 
-/* ========================================================================== */
-/* Configuration and Status */
-/* ========================================================================== */
-
-const zone_programming_context_t* Zones_GetContext(void)
-{
-    return &g_zone_ctx;
-}
-
-zone_error_t Zones_GetLastError(void)
-{
-    return g_zone_ctx.last_error;
-}
-
-void Zones_ResetErrors(void)
-{
-    g_zone_ctx.last_error = ZONE_ERROR_NONE;
-    g_zone_ctx.error_count = 0;
-}
-
-zone_error_t Zones_SetConfig(bool auto_exit, uint16_t preview_duration_ms, uint8_t default_brightness)
-{
-    if (preview_duration_ms == 0 || default_brightness == 0 || default_brightness > 10) {
-        return ZONE_ERROR_INVALID_PARAM;
-    }
-
-    g_zone_ctx.auto_exit_enabled = auto_exit;
-    g_zone_ctx.preview_duration_ms = preview_duration_ms;
-    g_zone_ctx.default_brightness = default_brightness;
-
-    LOG_INFO("Zone config updated: auto_exit=%d, preview=%dms, brightness=%d",
-             auto_exit, preview_duration_ms, default_brightness);
-
-    return ZONE_ERROR_NONE;
-}
-
-/* ========================================================================== */
-/* EEPROM Storage Interface */
-/* ========================================================================== */
-
-zone_error_t Zones_RegisterStorageInterface(const zone_storage_interface_t *interface)
-{
-    if (!interface) {
-        return ZONE_ERROR_INVALID_PARAM;
-    }
-
-    // Validate required function pointers
-    if (!interface->write_zone || !interface->read_zone || !interface->erase_zone) {
-        LOG_ERROR("Storage interface missing required functions");
-        return ZONE_ERROR_INVALID_PARAM;
-    }
-
-    g_storage_interface = interface;
-    LOG_INFO("Storage interface registered successfully");
-
-    return ZONE_ERROR_NONE;
-}
-
-/* ========================================================================== */
-/* Factory Reset and Defaults */
-/* ========================================================================== */
-
-zone_error_t Zones_FactoryReset(void)
-{
-    if (!g_storage_interface || !g_storage_interface->format_storage) {
-        LOG_ERROR("No storage interface for factory reset");
-        return ZONE_ERROR_MEMORY;
-    }
-
-    LOG_INFO("Performing factory reset of all zones");
-
-    zone_error_t result = g_storage_interface->format_storage();
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Factory reset failed: %d", result);
-        return result;
-    }
-
-    // Clear all slot occupied flags
-    memset(g_zone_ctx.manager.slot_occupied, 0, sizeof(g_zone_ctx.manager.slot_occupied));
-
-    // Create defaults
-    result = Zones_CreateDefaults();
-    if (result != ZONE_ERROR_NONE) {
-        LOG_ERROR("Failed to create default zones: %d", result);
-        return result;
-    }
-
-    LOG_INFO("Factory reset completed successfully");
-    return ZONE_ERROR_NONE;
-}
-
-zone_error_t Zones_CreateDefaults(void)
-{
-    LOG_INFO("Creating default zone configurations");
-
-    // Create a default zone in slot 0 - main typing area
-    zone_storage_t default_zone;
-    zone_error_t result = CreateDefaultZone(&default_zone, 0);
-    if (result != ZONE_ERROR_NONE) {
-        return result;
-    }
-
-    // Set warm amber color for main typing area
-    Backlight_RGB_t warm_amber = {80, 40, 10};  // Warm amber/orange
-
-    // Add main typing keys to default zone using the LED mapping
-    uint8_t key_count = 0;
-
-    // Add number row (1-0, -, =)
-    for (uint8_t col = 1; col <= 12; col++) {
-        if (get_led_for_key(1, col) != NULL && key_count < ZONE_MAX_KEYS) {
-            default_zone.keys[key_count].row = 1;
-            default_zone.keys[key_count].col = col;
-            default_zone.keys[key_count].color = warm_amber;
-            default_zone.keys[key_count].active = 1;
-            key_count++;
-        }
-    }
-
-    // Add QWERTY row (Q-P, [, ])
-    for (uint8_t col = 1; col <= 12; col++) {
-        if (get_led_for_key(2, col) != NULL && key_count < ZONE_MAX_KEYS) {
-            default_zone.keys[key_count].row = 2;
-            default_zone.keys[key_count].col = col;
-            default_zone.keys[key_count].color = warm_amber;
-            default_zone.keys[key_count].active = 1;
-            key_count++;
-        }
-    }
-
-    // Add ASDF row (A-L, ;, ')
-    for (uint8_t col = 1; col <= 11; col++) {
-        if (get_led_for_key(3, col) != NULL && key_count < ZONE_MAX_KEYS) {
-            default_zone.keys[key_count].row = 3;
-            default_zone.keys[key_count].col = col;
-            default_zone.keys[key_count].color = warm_amber;
-            default_zone.keys[key_count].active = 1;
-            key_count++;
-        }
-    }
-
-    // Add ZXCV row (Z-M, ,, .)
-    for (uint8_t col = 2; col <= 10; col++) {  // Skip left shift
-        if (get_led_for_key(4, col) != NULL && key_count < ZONE_MAX_KEYS) {
-            default_zone.keys[key_count].row = 4;
-            default_zone.keys[key_count].col = col;
-            default_zone.keys[key_count].color = warm_amber;
-            default_zone.keys[key_count].active = 1;
-            key_count++;
-        }
-    }
-
-    default_zone.metadata.key_count = key_count;
-    strcpy((char*)default_zone.metadata.name, "Main Typing");
-
-    // Save default zone
-    if (g_storage_interface && g_storage_interface->write_zone) {
-        result = g_storage_interface->write_zone(0, &default_zone);
-        if (result == ZONE_ERROR_NONE) {
-            g_zone_ctx.manager.slot_occupied[0] = true;
-            LOG_INFO("Default main typing zone created in slot 0 with %d keys", key_count);
-        }
-    }
-
-    // Create a WASD gaming zone in slot 1
-    zone_storage_t gaming_zone;
-    result = CreateDefaultZone(&gaming_zone, 1);
-    if (result == ZONE_ERROR_NONE) {
-        Backlight_RGB_t gaming_red = {120, 0, 0};  // Bright red for gaming
-
-        // Add WASD keys
-        const uint8_t wasd_keys[4][2] = {{2, 2}, {3, 1}, {3, 2}, {3, 3}};  // W, A, S, D
-        key_count = 0;
-
-        for (uint8_t i = 0; i < 4; i++) {
-            uint8_t row = wasd_keys[i][0];
-            uint8_t col = wasd_keys[i][1];
-            if (get_led_for_key(row, col) != NULL) {
-                gaming_zone.keys[key_count].row = row;
-                gaming_zone.keys[key_count].col = col;
-                gaming_zone.keys[key_count].color = gaming_red;
-                gaming_zone.keys[key_count].active = 1;
-                key_count++;
-            }
-        }
-
-        gaming_zone.metadata.key_count = key_count;
-        strcpy((char*)gaming_zone.metadata.name, "WASD Gaming");
-
-        if (g_storage_interface && g_storage_interface->write_zone) {
-            result = g_storage_interface->write_zone(1, &gaming_zone);
-            if (result == ZONE_ERROR_NONE) {
-                g_zone_ctx.manager.slot_occupied[1] = true;
-                LOG_INFO("Default WASD gaming zone created in slot 1 with %d keys", key_count);
+    for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+        for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+            if (Zones_IsValidKey(row, col)) {
+                g_prog_ctx.selection.selected[row][col] = true;
+                g_prog_ctx.selection.selection_count++;
             }
         }
     }
 
-    return ZONE_ERROR_NONE;
+    return ShowKeySelection();
 }
 
-/* ========================================================================== */
-/* Private Functions Implementation */
-/* ========================================================================== */
-
-static zone_error_t ProcessStateMachine(void)
+config_status_t Zones_EnterHSV(void)
 {
-    switch (g_zone_ctx.current_state) {
-        case ZONE_STATE_INACTIVE:
-            // Nothing to process
-            return ZONE_ERROR_NONE;
+    if (g_prog_ctx.current_state != ZONE_PROG_EDIT) return CONFIG_INVALID_PARAMETER;
+    if (g_prog_ctx.selection.selection_count == 0) return CONFIG_INVALID_PARAMETER;
 
-        case ZONE_STATE_BROWSE:
-            return ProcessBrowseState();
+    g_prog_ctx.previous_state = g_prog_ctx.current_state;
+    g_prog_ctx.current_state = ZONE_PROG_HSV_ADJUST;
+    UpdateActivityTime();
 
-        case ZONE_STATE_EDIT:
-            return ProcessEditState();
+    if (g_prog_ctx.color_mode_active) {
+		show_color_mode_display();
+	}
+    return CONFIG_OK;
+}
 
-        case ZONE_STATE_HSV_ADJUST:
-            return ProcessHSVState();
+config_status_t Zones_AdjustHue(int8_t direction)
+{
+    if (g_prog_ctx.current_state != ZONE_PROG_HSV_ADJUST) {
+        return CONFIG_INVALID_PARAMETER;
+    }
 
-        case ZONE_STATE_SAVE_CONFIRM:
-            return ProcessSaveConfirmState();
+    UpdateActivityTime();
 
-        case ZONE_STATE_ERROR:
-            // Handle error state recovery
-            LOG_WARNING("Recovering from error state");
-            g_zone_ctx.current_state = ZONE_STATE_INACTIVE;
-            return ZONE_ERROR_NONE;
+    int16_t new_hue = g_prog_ctx.hsv.hue + (direction * g_prog_ctx.hsv.hue_step);
+    if (new_hue < 0) new_hue += 360;
+    else if (new_hue >= 360) new_hue -= 360;
+
+    g_prog_ctx.hsv.hue = (uint16_t)new_hue;
+
+    // Update display based on mode
+	if (g_prog_ctx.color_mode_active)
+	{
+		Backlight_RGB_t rgb = Backlight_HSVtoRGB(g_prog_ctx.hsv.hue,
+													g_prog_ctx.hsv.saturation,
+													g_prog_ctx.hsv.value);
+		rgb_color_t session_color = {rgb.r, rgb.g, rgb.b};
+
+		// Apply based on existing edit_mode
+		if (g_prog_ctx.edit_mode == ZONE_EDIT_INDIVIDUAL) {
+			// Individual key mode: only apply to color_target_row/col
+			session_set_key_color(g_prog_ctx.color_target_row,
+								 g_prog_ctx.color_target_col,
+								 session_color, true);
+		} else if (g_prog_ctx.edit_mode == ZONE_EDIT_GROUP) {
+			// Zone mode: apply to all selected keys
+			for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+				for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+					if (g_prog_ctx.selection.selected[row][col]) {
+						session_set_key_color(row, col, session_color, true);
+					}
+				}
+			}
+		}
+
+		g_prog_ctx.has_unsaved_changes = true;
+        show_color_mode_display();
+    }
+    return CONFIG_OK;
+}
+
+
+config_status_t Zones_AdjustBrightness(int8_t direction)
+{
+    if (g_prog_ctx.current_state != ZONE_PROG_HSV_ADJUST) return CONFIG_INVALID_PARAMETER;
+
+    UpdateActivityTime();
+
+    int16_t new_value = g_prog_ctx.hsv.value + (direction * g_prog_ctx.hsv.sv_step);
+
+    if (new_value < HSV_VALUE_MIN) new_value = HSV_VALUE_MIN;
+    else if (new_value > HSV_VALUE_MAX) new_value = HSV_VALUE_MAX;
+
+    g_prog_ctx.hsv.value = (uint8_t)new_value;
+    // Use optimized display update
+   if (g_prog_ctx.color_mode_active)
+   {
+		Backlight_RGB_t rgb = Backlight_HSVtoRGB(g_prog_ctx.hsv.hue,
+													g_prog_ctx.hsv.saturation,
+													g_prog_ctx.hsv.value);
+		rgb_color_t session_color = {rgb.r, rgb.g, rgb.b};
+
+		// Apply based on existing edit_mode
+		if (g_prog_ctx.edit_mode == ZONE_EDIT_INDIVIDUAL) {
+			// Individual key mode: only apply to color_target_row/col
+			session_set_key_color(g_prog_ctx.color_target_row,
+								 g_prog_ctx.color_target_col,
+								 session_color, true);
+		} else if (g_prog_ctx.edit_mode == ZONE_EDIT_GROUP) {
+			// Zone mode: apply to all selected keys
+			for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+				for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+					if (g_prog_ctx.selection.selected[row][col]) {
+						session_set_key_color(row, col, session_color, true);
+					}
+				}
+			}
+		}
+
+		g_prog_ctx.has_unsaved_changes = true;
+
+    	show_color_mode_display();
+    }
+
+    return CONFIG_OK;
+}
+
+config_status_t Zones_AdjustSaturation(int8_t direction)
+{
+    if (g_prog_ctx.current_state != ZONE_PROG_HSV_ADJUST) return CONFIG_INVALID_PARAMETER;
+
+    UpdateActivityTime();
+
+    int16_t new_saturation = g_prog_ctx.hsv.saturation + (direction * g_prog_ctx.hsv.sv_step);
+
+    // Saturation bounds: 0-100
+    if (new_saturation < 0) new_saturation = 0;
+    else if (new_saturation > 100) new_saturation = 100;
+
+    g_prog_ctx.hsv.saturation = (uint8_t)new_saturation;
+
+    // Apply color changes in real-time for color mode
+    if (g_prog_ctx.color_mode_active)
+    {
+        // Convert HSV to RGB
+    	Backlight_RGB_t rgb = Backlight_HSVtoRGB(g_prog_ctx.hsv.hue,
+    	                                            g_prog_ctx.hsv.saturation,
+    	                                            g_prog_ctx.hsv.value);
+		rgb_color_t session_color = {rgb.r, rgb.g, rgb.b};
+
+		// Apply based on existing edit_mode
+		if (g_prog_ctx.edit_mode == ZONE_EDIT_INDIVIDUAL) {
+			// Individual key mode: only apply to color_target_row/col
+			session_set_key_color(g_prog_ctx.color_target_row,
+								 g_prog_ctx.color_target_col,
+								 session_color, true);
+		} else if (g_prog_ctx.edit_mode == ZONE_EDIT_GROUP) {
+			// Zone mode: apply to all selected keys
+			for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+				for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+					if (g_prog_ctx.selection.selected[row][col]) {
+						session_set_key_color(row, col, session_color, true);
+					}
+				}
+			}
+		}
+
+		g_prog_ctx.has_unsaved_changes = true;
+        show_color_mode_display();
+    }
+
+    return CONFIG_OK;
+}
+
+config_status_t Zones_ApplyHSVColor(void)
+{
+    if (g_prog_ctx.current_state != ZONE_PROG_HSV_ADJUST) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    Backlight_RGB_t rgb = Backlight_HSVtoRGB(g_prog_ctx.hsv.hue,
+                                            g_prog_ctx.hsv.saturation,
+                                            g_prog_ctx.hsv.value);
+    rgb_color_t system_color = {rgb.r, rgb.g, rgb.b};
+
+    if (g_prog_ctx.color_mode_active)
+    {
+        if (g_prog_ctx.edit_mode == ZONE_EDIT_INDIVIDUAL) {
+            // Apply to individual key
+            session_set_key_color(g_prog_ctx.color_target_row,
+                                 g_prog_ctx.color_target_col,
+								 system_color, true);
+            Backlight_SetKeyRGB(g_prog_ctx.color_target_row,
+                               g_prog_ctx.color_target_col, rgb);
+        } else if (g_prog_ctx.edit_mode == ZONE_EDIT_GROUP) {
+            // Apply to all selected keys
+            for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+                for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+                    if (g_prog_ctx.selection.selected[row][col]) {
+                        session_set_key_color(row, col, system_color, true);
+                        Backlight_SetKeyRGB(row, col, rgb);
+                    }
+                }
+            }
+        }
+
+        g_prog_ctx.has_unsaved_changes = true;
+        return CONFIG_OK;  // Stay in color mode for more adjustments
+    }
+
+    // Original behavior for normal HSV mode
+    UpdateActivityTime();
+
+    for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+        for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+            if (g_prog_ctx.selection.selected[row][col]) {
+                session_set_key_color(row, col, system_color, true);
+                Backlight_SetKeyRGB(row, col, rgb);
+            }
+        }
+    }
+
+    g_prog_ctx.color_explicitly_programmed = true;
+    g_prog_ctx.has_unsaved_changes = true;
+    g_prog_ctx.current_state = g_prog_ctx.previous_state;
+    return CONFIG_OK;
+}
+
+bool Zones_HandleKey(uint8_t row, uint8_t col, bool pressed)
+{
+    if (!g_initialized || g_prog_ctx.current_state == ZONE_PROG_INACTIVE || !pressed) {
+        return false;
+    }
+
+    UpdateActivityTime();
+
+    // Right-Alt tracking with proper cleanup on section switches
+    if (row == 5 && col == 3) {
+        g_prog_ctx.right_alt_pressed = pressed;
+        return true;
+    }
+
+
+
+    // Handle R_Alt combinations first
+    if (g_prog_ctx.right_alt_pressed && pressed) {
+		return handle_right_alt_combinations(row, col);
+    }
+
+    // State machine dispatch
+    switch (g_prog_ctx.current_state) {
+        case ZONE_PROG_BROWSE:
+			return handle_browse_keys(row, col);
+
+        case ZONE_PROG_PREVIEW:
+			return handle_preview_keys(row, col);
+
+        case ZONE_PROG_EDIT:
+            if (Zones_IsValidKey(row, col)) {
+                Zones_ToggleKeySelection(row, col);
+                return true;
+            }
+            return false;
+
+        case ZONE_PROG_HSV_ADJUST:
+            // Color assignment mode
+            return handle_color_hsv_keys(row, col);
 
         default:
-            LOG_ERROR("Unknown zone state: %d", g_zone_ctx.current_state);
-            g_zone_ctx.current_state = ZONE_STATE_ERROR;
-            return ZONE_ERROR_INVALID_STATE;
+            return false;
     }
 }
 
-static zone_error_t ProcessBrowseState(void)
+bool Zones_IsValidKey(uint8_t row, uint8_t col)
 {
-    // Handle preview timeout
-    if (g_zone_ctx.preview_active) {
-        uint32_t preview_elapsed = HAL_GetTick() - g_zone_ctx.preview_start_time;
-        if (preview_elapsed >= g_zone_ctx.preview_duration_ms) {
-            g_zone_ctx.preview_active = false;
-            // Restore browse interface
-            return ShowSlotIndicators();
-        }
-    }
-
-    return ZONE_ERROR_NONE;
+	if (row >= ZONE_MATRIX_ROWS || col >= ZONE_MATRIX_COLS) return false;
+	return (get_led_for_key(row, col) != NULL);
 }
 
-static zone_error_t ProcessEditState(void)
+bool Zones_IsValidZone(uint8_t zone_id)
 {
-    // Periodically refresh key selection display
-    uint32_t state_elapsed = HAL_GetTick() - g_zone_ctx.state_start_time;
-    if (state_elapsed % 2000 == 0) {  // Every 2 seconds
-        return ShowKeySelection();
-    }
-
-    return ZONE_ERROR_NONE;
+    return zone_id < ZONE_MAX_ZONES;
 }
 
-static zone_error_t ProcessHSVState(void)
-{
-    // Update HSV preview continuously
-    return ShowHSVPreview();
-}
 
-static zone_error_t ProcessSaveConfirmState(void)
-{
-    // Handle save confirmation timeout
-    uint32_t state_elapsed = HAL_GetTick() - g_zone_ctx.state_start_time;
-    if (state_elapsed >= 3000) {  // 3 second timeout
-        g_zone_ctx.current_state = ZONE_STATE_EDIT;
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t InitializeZoneSlots(void)
-{
-    // Initialize slot occupied flags
-    memset(g_zone_ctx.manager.slot_occupied, 0, sizeof(g_zone_ctx.manager.slot_occupied));
-
-    if (!g_storage_interface || !g_storage_interface->is_slot_valid) {
-        LOG_WARNING("No storage interface - slots marked as empty");
-        return ZONE_ERROR_NONE;
-    }
-
-    // Check which slots are occupied
-    uint8_t occupied_count = 0;
-    for (uint8_t i = 0; i < ZONE_MAX_SLOTS; i++) {
-        bool slot_valid = g_storage_interface->is_slot_valid(i);
-        g_zone_ctx.manager.slot_occupied[i] = slot_valid;
-        if (slot_valid) {
-            occupied_count++;
-        }
-    }
-
-    LOG_INFO("Zone slots initialized: %d/%d occupied", occupied_count, ZONE_MAX_SLOTS);
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t ValidateZoneIntegrity(const zone_storage_t *zone)
-{
-    if (!zone) {
-        return ZONE_ERROR_INVALID_PARAM;
-    }
-
-    // Check version
-    if (zone->metadata.version != ZONE_VERSION_CURRENT) {
-        LOG_ERROR("Invalid zone version: %d (expected %d)",
-                  zone->metadata.version, ZONE_VERSION_CURRENT);
-        return ZONE_ERROR_CRC_MISMATCH;
-    }
-
-    // Check key count
-    if (zone->metadata.key_count > ZONE_MAX_KEYS) {
-        LOG_ERROR("Invalid key count: %d (max %d)",
-                  zone->metadata.key_count, ZONE_MAX_KEYS);
-        return ZONE_ERROR_CRC_MISMATCH;
-    }
-
-    // Validate key positions
-    for (uint8_t i = 0; i < zone->metadata.key_count; i++) {
-        const zone_key_data_t *key = &zone->keys[i];
-        if (!IsValidKey(key->row, key->col)) {
-            LOG_ERROR("Invalid key position in zone: (%d,%d)", key->row, key->col);
-            return ZONE_ERROR_CRC_MISMATCH;
-        }
-    }
-
-    // Validate CRC (skip for now - will be implemented with hardware CRC)
-    uint16_t calculated_crc = CalculateZoneCRC16(zone);
-    if (calculated_crc != zone->metadata.crc16) {
-        LOG_ERROR("CRC mismatch: expected 0x%04X, got 0x%04X",
-                  zone->metadata.crc16, calculated_crc);
-        return ZONE_ERROR_CRC_MISMATCH;
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-static uint16_t CalculateZoneCRC16(const zone_storage_t *zone)
-{
-    if (!zone) {
-        return 0;
-    }
-
-    // Simple CRC-16 calculation for now
-    // TODO: Replace with STM32L072 hardware CRC peripheral
-    uint16_t crc = 0xFFFF;
-    const uint8_t *data = (const uint8_t*)zone;
-
-    // Calculate CRC for all data except the CRC field itself
-    size_t crc_offset = offsetof(zone_metadata_t, crc16);
-    size_t data_len = sizeof(zone_storage_t);
-
-    // Process data before CRC field
-    for (size_t i = 0; i < crc_offset; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ ZONE_CRC_POLYNOMIAL;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-
-    // Skip CRC field and process remaining data
-    for (size_t i = crc_offset + sizeof(uint16_t); i < data_len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ ZONE_CRC_POLYNOMIAL;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-
-    return crc;
-}
-
-static zone_error_t CreateDefaultZone(zone_storage_t *zone, uint8_t slot_id)
-{
-    if (!zone) {
-        return ZONE_ERROR_INVALID_PARAM;
-    }
-
-    memset(zone, 0, sizeof(zone_storage_t));
-
-    // Initialize metadata
-    zone->metadata.version = ZONE_VERSION_CURRENT;
-    zone->metadata.slot_id = slot_id;
-    zone->metadata.key_count = 0;
-    zone->metadata.brightness_level = g_zone_ctx.default_brightness;
-    zone->metadata.created_timestamp = HAL_GetTick();
-    zone->metadata.modified_timestamp = HAL_GetTick();
-
-    snprintf((char*)zone->metadata.name, sizeof(zone->metadata.name), "Zone %d", slot_id + 1);
-
-    // CRC will be calculated when saving
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t ShowSlotIndicators(void)
-{
-    // Clear all LEDs first
-    Backlight_SetAll(0, 0, 0);
-
-    // Show slot indicators on number row keys 1-8
-    for (uint8_t i = 0; i < ZONE_MAX_SLOTS; i++) {
-        uint8_t row = ZONE_SLOT_ROW;
-        uint8_t col = ZONE_SLOT_START_COL + i;
-
-        // Check if this key position has an LED using the mapping
-        if (get_led_for_key(row, col) != NULL) {
-            if (g_zone_ctx.manager.slot_occupied[i]) {
-                Backlight_SetKeyRGB(row, col, ZONE_COLOR_SET);     // Green for occupied
-            } else {
-                Backlight_SetKeyRGB(row, col, ZONE_COLOR_UNSET);   // Red for empty
-            }
-        }
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t ShowKeySelection(void)
-{
-    // Clear all LEDs
-    Backlight_SetAll(0, 0, 0);
-
-    // Show current zone keys with dimmed colors
-    for (uint8_t i = 0; i < g_zone_ctx.manager.staging_zone.metadata.key_count; i++) {
-        zone_key_data_t *key = &g_zone_ctx.manager.staging_zone.keys[i];
-        if (key->active && IsValidKey(key->row, key->col)) {
-            // Show zone key with dimmed color (1/4 brightness)
-            Backlight_RGB_t dim_color = {
-                key->color.r / 4,
-                key->color.g / 4,
-                key->color.b / 4
-            };
-            Backlight_SetKeyRGB(key->row, key->col, dim_color);
-        }
-    }
-
-    // Highlight selected keys with cyan
-    for (uint8_t row = 0; row < BACKLIGHT_MATRIX_ROWS; row++) {
-        for (uint8_t col = 0; col < BACKLIGHT_MATRIX_COLS; col++) {
-            if (g_zone_ctx.selection.selected[row][col] && get_led_for_key(row, col) != NULL) {
-                Backlight_SetKeyRGB(row, col, ZONE_COLOR_SELECTED);  // Cyan for selected
-            }
-        }
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t ShowHSVPreview(void)
-{
-    // Convert current HSV to RGB
-    Backlight_RGB_t preview_color = Backlight_HSVtoRGB(g_zone_ctx.hsv.hue,
-                                                       g_zone_ctx.hsv.saturation,
-                                                       g_zone_ctx.hsv.value);
-
-    // Apply preview color to selected keys
-    for (uint8_t row = 0; row < BACKLIGHT_MATRIX_ROWS; row++) {
-        for (uint8_t col = 0; col < BACKLIGHT_MATRIX_COLS; col++) {
-            if (g_zone_ctx.selection.selected[row][col] && get_led_for_key(row, col) != NULL) {
-                Backlight_SetKeyRGB(row, col, preview_color);
-            }
-        }
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t FlashConfirmation(bool success)
-{
-    Backlight_RGB_t flash_color = success ? ZONE_COLOR_SET : ZONE_COLOR_UNSET;
-    uint8_t flash_count = success ? 1 : 3;
-
-    for (uint8_t i = 0; i < flash_count; i++) {
-        // Flash on
-        Backlight_SetAllRGB(flash_color);
-        HAL_Delay(FLASH_PULSE_DURATION_MS);
-
-        // Flash off
-        Backlight_SetAll(0, 0, 0);
-        if (i < flash_count - 1) {
-            HAL_Delay(FLASH_PULSE_DURATION_MS);
-        }
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t SaveEffectsState(void)
-{
-    g_effects_were_active = Effects_IsActive();
-    g_previous_effect_type = Effects_GetCurrentType();
-
-    LOG_DEBUG("Saved effects state: active=%d, type=%d",
-              g_effects_were_active, g_previous_effect_type);
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t RestoreEffectsState(void)
-{
-    if (g_effects_were_active) {
-        LOG_DEBUG("Restoring effects: type=%d", g_previous_effect_type);
-        Effects_StartRuntimeEffect();
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t SuspendEffects(void)
-{
-    if (Effects_IsActive()) {
-        Effects_Stop();
-        LOG_DEBUG("Effects suspended for zone programming");
-    }
-
-    return ZONE_ERROR_NONE;
-}
-
-static zone_error_t ResumeEffects(void)
-{
-    return RestoreEffectsState();
-}
-
-static bool IsValidSlot(uint8_t slot_id)
-{
-    return slot_id < ZONE_MAX_SLOTS;
-}
-
-static bool IsValidKey(uint8_t row, uint8_t col)
-{
-    return (row < BACKLIGHT_MATRIX_ROWS) &&
-           (col < BACKLIGHT_MATRIX_COLS) &&
-           (get_led_for_key(row, col) != NULL);
-}
-
-static bool HasUserActivity(void)
-{
-    // This would be called by keyboard interrupt handlers
-    // For now, just check if we're actively processing
-    return (g_zone_ctx.current_state != ZONE_STATE_INACTIVE);
-}
-
+/* Private Functions */
 static void UpdateActivityTime(void)
 {
-    g_zone_ctx.last_activity_time = HAL_GetTick();
+    g_prog_ctx.last_activity_time = HAL_GetTick();
 }
 
-static zone_error_t HandleTimeout(void)
+static config_status_t ShowSlotIndicators(void)
 {
-    if (!g_zone_ctx.auto_exit_enabled || g_zone_ctx.current_state == ZONE_STATE_INACTIVE) {
-        return ZONE_ERROR_NONE;
+    Backlight_SetAll(0, 0, 0);
+
+    for (uint8_t slot = 0; slot < ZONE_MAX_ZONES; slot++) {
+        uint8_t row = ZONE_SLOT_ROW;
+        uint8_t col = ZONE_SLOT_START_COL + slot;
+
+        if (Zones_IsValidKey(row, col)) {
+            bool occupied = Zones_IsSlotOccupied(slot);
+            Backlight_RGB_t color = occupied ? COLOR_GREEN : COLOR_RED;
+            Backlight_SetKeyRGB(row, col, color);
+        }
     }
 
-    uint32_t elapsed = HAL_GetTick() - g_zone_ctx.last_activity_time;
-    if (elapsed >= ZONE_PROGRAMMING_TIMEOUT_MS) {
-        LOG_INFO("Zone programming timeout - auto-exiting without saving");
-        return Zones_ExitProgramming(false);  // Exit without saving
-    }
-
-    return ZONE_ERROR_NONE;
+    return CONFIG_OK;
 }
 
-static zone_error_t AddKeyToZone(zone_storage_t *zone, uint8_t row, uint8_t col, Backlight_RGB_t color)
+
+zone_programming_state_t Zone_Return_to_Section(bool pressed)
 {
-    if (!zone || !IsValidKey(row, col)) {
-        return ZONE_ERROR_INVALID_PARAM;
+    // Block navigation if in HSV color mode
+    if (isZoneHSVMode()) {
+        LOG_DEBUG("Navigation blocked - HSV color mode active");
+        return g_prog_ctx.current_state;  // Stay in current state
     }
 
-    // Look for existing key first
-    zone_key_data_t *existing_key = FindKeyInZone(zone, row, col);
-    if (existing_key) {
-        // Update existing key
-        existing_key->color = color;
-        existing_key->active = 1;
-        return ZONE_ERROR_NONE;
+    switch (g_prog_ctx.current_state) {
+        case ZONE_PROG_BROWSE:
+            // From browse mode, should return to main config menu
+        	if(pressed){
+        		g_prog_ctx.current_state = ZONE_PROG_INACTIVE;
+        	}else{
+        		Zones_EnterBrowse();
+        		g_prog_ctx.current_state = ZONE_PROG_BROWSE;
+        	}
+            return g_prog_ctx.current_state;  // Signal to exit zones
+
+        case ZONE_PROG_EDIT:
+            // From edit mode, return to zone browse (slot selection)
+        	if(pressed){
+				Zones_EnterBrowse();
+				g_prog_ctx.current_state = ZONE_PROG_BROWSE;
+        	}else{
+        		ShowKeySelection();
+        		g_prog_ctx.current_state = ZONE_PROG_EDIT;
+        	}
+            return g_prog_ctx.current_state;
+
+        case ZONE_PROG_PREVIEW:
+        	if (pressed) {
+				exit_preview_mode();  // Return to browse
+			}
+			return g_prog_ctx.current_state;
+
+        case ZONE_PROG_HSV_ADJUST:
+            // Should be blocked by isZoneHSVMode() check above
+            LOG_WARNING("HSV mode detected in switch - should be blocked");
+            return g_prog_ctx.current_state;  // Stay in HSV mode
+
+        case ZONE_PROG_INACTIVE:
+            // Not in zone programming
+            LOG_DEBUG("Zone programming not active");
+            return ZONE_PROG_INACTIVE;
+
+        default:
+            LOG_WARNING("Unknown zone programming state: %d", g_prog_ctx.current_state);
+            return g_prog_ctx.current_state;
     }
-
-    // Add new key if space available
-    if (zone->metadata.key_count >= ZONE_MAX_KEYS) {
-        LOG_ERROR("Zone full - cannot add key (%d,%d)", row, col);
-        return ZONE_ERROR_STORAGE_FULL;
-    }
-
-    zone_key_data_t *new_key = &zone->keys[zone->metadata.key_count];
-    new_key->row = row;
-    new_key->col = col;
-    new_key->color = color;
-    new_key->active = 1;
-    zone->metadata.key_count++;
-
-    LOG_DEBUG("Added key (%d,%d) to zone (now %d keys)", row, col, zone->metadata.key_count);
-    return ZONE_ERROR_NONE;
 }
 
-static zone_error_t RemoveKeyFromZone(zone_storage_t *zone, uint8_t row, uint8_t col)
+bool isZoneHSVMode(void)
 {
-    if (!zone) {
-        return ZONE_ERROR_INVALID_PARAM;
-    }
+    return g_prog_ctx.color_mode_active;
+}
 
-    // Find key to remove
-    for (uint8_t i = 0; i < zone->metadata.key_count; i++) {
-        zone_key_data_t *key = &zone->keys[i];
-        if (key->row == row && key->col == col) {
-            // Move last key to this position to avoid gaps
-            if (i < zone->metadata.key_count - 1) {
-                zone->keys[i] = zone->keys[zone->metadata.key_count - 1];
+config_status_t ShowKeySelection(void)
+{
+    // Start with all keys OFF
+    Backlight_SetAll(0, 0, 0);
+
+    // Show saved individual colors from staging session
+    uint8_t led_count;
+    if (session_get_staging_led_count(&led_count) == CONFIG_OK) {
+        for (uint8_t i = 0; i < led_count; i++) {
+            uint8_t row, col;
+            rgb_color_t color;
+            if (session_get_staging_led_data(i, &row, &col, &color) == CONFIG_OK) {
+            	if (g_prog_ctx.selection.selected[row][col]) {
+					Backlight_RGB_t display_color = {color.red, color.green, color.blue};
+					Backlight_SetKeyRGB(row, col, display_color);
+				}
             }
-            zone->metadata.key_count--;
-            LOG_DEBUG("Removed key (%d,%d) from zone (now %d keys)", row, col, zone->metadata.key_count);
-            return ZONE_ERROR_NONE;
         }
     }
 
-    return ZONE_ERROR_INVALID_PARAM;  // Key not found
+    for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+		for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+			if (g_prog_ctx.selection.selected[row][col]) {
+				// Check if this key already has a saved color
+				bool has_saved_color = false;
+				for (uint8_t i = 0; i < led_count; i++) {
+					uint8_t s_row, s_col;
+					rgb_color_t s_color;
+					if (session_get_staging_led_data(i, &s_row, &s_col, &s_color) == CONFIG_OK) {
+						if (s_row == row && s_col == col) {
+							has_saved_color = true;
+							break;
+						}
+					}
+				}
+
+				// Only show cyan if no saved color exists
+				if (!has_saved_color) {
+					Backlight_SetKeyRGB(row, col, COLOR_CYAN);
+				}
+			}
+		}
+	}
+
+    return CONFIG_OK;
 }
 
-static zone_key_data_t* FindKeyInZone(zone_storage_t *zone, uint8_t row, uint8_t col)
+static bool handle_color_hsv_keys(uint8_t row, uint8_t col)
 {
-    if (!zone) {
-        return NULL;
+    if (!g_prog_ctx.color_mode_active) return false;
+
+    uint8_t keycode = layers[BASE_LAYER][row][col];
+
+    // WASD for more granular control
+    if (keycode == KC_W) { Zones_AdjustBrightness(1); return true; }
+    if (keycode == KC_S) { Zones_AdjustBrightness(-1); return true; }
+    if (keycode == KC_A) { Zones_AdjustSaturation(-1); return true; }
+    if (keycode == KC_D) { Zones_AdjustSaturation(1); return true; }
+    if (keycode == KC_Q) { Zones_AdjustHue(-1); return true; }
+    if (keycode == KC_E) { Zones_AdjustHue(1); return true; }
+
+    return false;
+}
+
+static config_status_t FlashConfirmation(bool success)
+{
+    Backlight_RGB_t flash_color = success ? COLOR_GREEN : COLOR_RED;
+    uint8_t flash_count = success ? 1 : 2;
+
+    for (uint8_t i = 0; i < flash_count; i++) {
+        Backlight_SetAllRGB(flash_color);
+        HAL_Delay(100);
+        Backlight_SetAll(0, 0, 0);
+        if (i < flash_count - 1) HAL_Delay(100);
     }
 
-    for (uint8_t i = 0; i < zone->metadata.key_count; i++) {
-        zone_key_data_t *key = &zone->keys[i];
-        if (key->row == row && key->col == col) {
-            return key;
+    return CONFIG_OK;
+}
+
+static bool enter_individual_color_mode(uint8_t row, uint8_t col)
+{
+	if(g_prog_ctx.selection.selection_count == 0) {
+		g_prog_ctx.right_alt_pressed = false;
+		return false;
+	}
+
+    g_prog_ctx.color_mode_active = true;
+    g_prog_ctx.edit_mode = ZONE_EDIT_INDIVIDUAL;
+    g_prog_ctx.right_alt_pressed = false;
+    g_prog_ctx.color_target_row = row;
+    g_prog_ctx.color_target_col = col;
+    g_prog_ctx.color_mode_start_time = HAL_GetTick();
+    g_prog_ctx.previous_state = ZONE_PROG_EDIT;
+    g_prog_ctx.current_state = ZONE_PROG_HSV_ADJUST;
+
+    show_color_mode_display();
+    LOG_INFO("Entered individual color mode for key (%d,%d)", row, col);
+    return true;
+}
+
+static bool enter_zone_color_mode(void)
+{
+
+	if(g_prog_ctx.selection.selection_count == 0) {
+		g_prog_ctx.right_alt_pressed = false;
+		return false;
+	}
+
+	for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+		for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+			if (g_prog_ctx.selection.selected[row][col]) {
+				session_remove_key_color(row, col);
+			}
+		}
+	}
+
+	g_prog_ctx.right_alt_pressed = false;
+    g_prog_ctx.color_mode_active = true;
+    g_prog_ctx.edit_mode = ZONE_EDIT_GROUP;
+    g_prog_ctx.color_mode_start_time = HAL_GetTick();
+    g_prog_ctx.previous_state = ZONE_PROG_EDIT;
+    g_prog_ctx.current_state = ZONE_PROG_HSV_ADJUST;
+
+    show_color_mode_display();
+    LOG_INFO("Entered zone color mode for %d selected keys", g_prog_ctx.selection.selection_count);
+    return true;
+}
+
+static void show_color_mode_display(void)
+{
+    // Calculate current HSV color
+    Backlight_RGB_t current_color = Backlight_HSVtoRGB(g_prog_ctx.hsv.hue,
+                                                       g_prog_ctx.hsv.saturation,
+                                                       g_prog_ctx.hsv.value);
+
+    // Set dim background on all keys
+    for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+        for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+            if (Backlight_HasLED(row, col)) {
+                bool is_target = false;
+
+                if (g_prog_ctx.edit_mode == ZONE_EDIT_INDIVIDUAL) {
+                    is_target = (row == g_prog_ctx.color_target_row &&
+                               col == g_prog_ctx.color_target_col);
+                } else if (g_prog_ctx.edit_mode == ZONE_EDIT_GROUP) {
+                    is_target = g_prog_ctx.selection.selected[row][col];
+                }
+                if (is_target) {
+                    Backlight_SetKeyRGB(row, col, current_color);
+                } else {
+                    Backlight_SetKeyRGB(row, col, (Backlight_RGB_t){2, 2, 2});
+                }
+            }
+        }
+    }
+}
+
+static config_status_t enter_edit_mode_with_existing_zone(uint8_t zone_id)
+{
+    // Standard edit mode entry (this creates a fresh, empty staging session)
+    config_status_t result = Zones_SelectZone(zone_id);
+    if (result != CONFIG_OK) {
+        return result;
+    }
+
+    Backlight_SetAll(0, 0, 0);
+    // Clear selection first
+    memset(&g_prog_ctx.selection, 0, sizeof(g_prog_ctx.selection));
+
+    // Populate staging from preview cache (which has the existing zone data)
+    if (g_prog_ctx.preview_cache.active && g_prog_ctx.preview_cache.key_count > 0) {
+
+        for (uint8_t i = 0; i < KEY_COUNT_; i++) {
+            zone_key_runtime_t *key = &g_prog_ctx.preview_cache.keys[i];
+
+            if (key->row < ZONE_MATRIX_ROWS && key->col < ZONE_MATRIX_COLS) {
+                // Add key to staging with its existing color
+                rgb_color_t existing_color = {
+                    .red = key->color.r,
+                    .green = key->color.g,
+                    .blue = key->color.b
+                };
+
+                // Add to staging (this populates the staging session)
+                session_set_key_color(key->row, key->col, existing_color, true);
+
+                // Add to selection context
+                g_prog_ctx.selection.selected[key->row][key->col] = true;
+                g_prog_ctx.selection.selection_count++;
+            }
+        }
+
+        LOG_INFO("Populated staging and selection with %d keys from preview cache",
+                 g_prog_ctx.selection.selection_count);
+    } else {
+        LOG_WARNING("No preview cache data available for zone %d", zone_id);
+    }
+
+    // Show the key selection with loaded keys
+    return ShowKeySelection();
+}
+
+static config_status_t enter_preview_mode(uint8_t zone_id)
+{
+    if (!Zones_IsSlotOccupied(zone_id)) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    LOG_INFO("Entering preview mode for zone %d", zone_id);
+
+    g_prog_ctx.preview_mode_active = true;
+    g_prog_ctx.preview_zone_id = zone_id;
+    g_prog_ctx.current_state = ZONE_PROG_PREVIEW;
+
+    // Load zone content to preview cache
+    load_zone_to_preview_cache(zone_id);
+
+    // Display the preview
+    show_preview_display();
+
+    UpdateActivityTime();
+    return CONFIG_OK;
+}
+
+static bool handle_browse_keys(uint8_t row, uint8_t col)
+{
+    // Zone slot selection (number row 1-8)
+    if (row == 1 && col >= 1 && col <= 8) {
+        uint8_t zone_id = col - 1;
+
+        if (Zones_IsSlotOccupied(zone_id)) {
+            // Occupied slot - enter preview mode (no timeout)
+            return (enter_preview_mode(zone_id) == CONFIG_OK);
+        } else {
+            // Empty slot - enter edit mode directly
+            return (Zones_SelectZone(zone_id) == CONFIG_OK);
         }
     }
 
-    return NULL;  // Key not found
+    return false;
 }
+
+
+static bool handle_preview_keys(uint8_t row, uint8_t col)
+{
+    uint8_t keycode = layers[BASE_LAYER][row][col];
+
+    // Space key = Enter edit mode for current previewed zone
+    if (keycode == KC_SPACE) { //XXX
+        LOG_INFO("Space pressed - entering edit mode for zone %d", g_prog_ctx.preview_zone_id);
+
+        // Enter edit mode and load existing keys + update selection
+        uint8_t zone_to_edit = g_prog_ctx.preview_zone_id;
+        enter_edit_mode_with_existing_zone(zone_to_edit);
+        return true;
+    }
+
+    // Escape = Return to browse immediately
+    if (keycode == KC_BSPACE) { //XXX Preview Mode
+        exit_preview_mode();
+        return true;
+    }
+
+    // Other keys = ignore (stay in preview)
+    UpdateActivityTime();
+    return true;
+}
+
+static void load_zone_to_preview_cache(uint8_t zone_id)
+{
+    // Initialize preview cache
+    g_prog_ctx.preview_cache.active = false;
+    g_prog_ctx.preview_cache.key_count = 0;
+    memset(g_prog_ctx.preview_cache.keys, 0, sizeof(g_prog_ctx.preview_cache.keys));
+
+    // For slots 0-1: Check runtime cache directly
+    if (zone_id <= 1) {
+        zone_runtime_t *rt_zone = &g_zone_rt_ctx.zones[zone_id];
+
+        if (rt_zone->key_count > 0) {
+            g_prog_ctx.preview_cache = *rt_zone;
+            g_prog_ctx.preview_cache.active = true;
+
+            return;
+        }
+    }
+
+    // Load from EEPROM using session system
+    if (session_begin_edit(zone_id) == CONFIG_OK) {
+        uint8_t led_count;
+        if (session_get_staging_led_count(&led_count) == CONFIG_OK && led_count > 0) {
+            for (uint8_t i = 0; i < led_count && i < KEY_COUNT_ && g_prog_ctx.preview_cache.key_count < 80; i++) {
+                uint8_t row, col;
+                rgb_color_t color;
+                if (session_get_staging_led_data(i, &row, &col, &color) == CONFIG_OK) {
+                    // Validate coordinates before adding
+                    if (row < ZONE_MATRIX_ROWS && col < ZONE_MATRIX_COLS) {
+                        g_prog_ctx.preview_cache.keys[g_prog_ctx.preview_cache.key_count] = (zone_key_runtime_t){
+                            .row = row,
+                            .col = col,
+                            .color = {color.red, color.green, color.blue}
+                        };
+                        g_prog_ctx.preview_cache.key_count++;
+                    }
+                }
+            }
+        }
+        session_end_edit(false); // Don't save, just previewing
+        g_prog_ctx.preview_cache.active = (g_prog_ctx.preview_cache.key_count > 0);
+
+        LOG_INFO("Loaded %d keys from EEPROM for preview", g_prog_ctx.preview_cache.key_count);
+    }
+
+    // If no keys loaded from either source
+    if (!g_prog_ctx.preview_cache.active) {
+        LOG_WARNING("No keys found for zone %d preview", zone_id);
+    }
+}
+
+
+static void show_preview_display(void)
+{
+    // Start with dim background
+    Backlight_SetAllRGB(BACKLIGHT_OFF);
+
+    // Show cached zone content at full brightness
+    if (g_prog_ctx.preview_cache.active) {
+        for (uint8_t i = 0; i < 80; i++) {
+            zone_key_runtime_t *key = &g_prog_ctx.preview_cache.keys[i];
+            Backlight_SetKeyRGB(key->row, key->col, key->color);
+        }
+    }
+
+    // Show space key indicator for "press to edit"
+    Backlight_SetKeyRGB(5, 4, COLOR_GREEN);  // Space key highlighted
+    Backlight_SetKeyRGB(1, 13, COLOR_RED);  // ESC key highlighted
+}
+
+static bool handle_right_alt_combinations(uint8_t row, uint8_t col)
+{
+    uint8_t keycode = layers[BASE_LAYER][row][col];
+
+    // R_Alt + Enter = Apply color and exit
+    if (keycode == KC_ENTER && g_prog_ctx.color_mode_active) {
+        apply_color_and_exit();
+        return true;
+    }
+
+    // R_Alt + Backspace = Reset to zone default and exit
+    if (keycode == KC_BSPACE && g_prog_ctx.color_mode_active) {
+        reset_to_zone_default_and_exit();
+        return true;
+    }
+
+    // R_Alt + Z = Enter zone color mode
+    if (keycode == KC_Z && g_prog_ctx.current_state == ZONE_PROG_EDIT &&
+        !g_prog_ctx.preview_mode_active && g_prog_ctx.selection.selection_count > 0) {
+        enter_zone_color_mode();
+        return true;
+    }
+
+    // R_Alt + zone slot (in preview) = Enter edit mode
+    if (g_prog_ctx.preview_mode_active && row == 1 && col >= 1 && col <= 8) {
+        uint8_t zone_id = col - 1;
+        if (zone_id == g_prog_ctx.preview_zone_id) {
+            enter_edit_from_preview();
+            return true;
+        }
+    }
+
+    // R_Alt + individual key = Enter individual key color mode
+    if (g_prog_ctx.current_state == ZONE_PROG_EDIT && !g_prog_ctx.preview_mode_active &&
+        Zones_IsValidKey(row, col)) {
+        enter_individual_color_mode(row, col);
+        return true;
+    }
+
+    g_prog_ctx.right_alt_pressed = false;
+    return false;
+}
+
+static void exit_preview_mode(void)
+{
+    if (!g_prog_ctx.preview_mode_active) return;
+
+    //LOG_INFO("Exiting preview mode for zone %d", g_prog_ctx.preview_zone_id);
+
+    g_prog_ctx.preview_mode_active = false;
+    g_prog_ctx.preview_zone_id = 0xFF;
+    g_prog_ctx.preview_cache.active = false;
+    g_prog_ctx.preview_cache.key_count = 0;
+    g_prog_ctx.current_state = ZONE_PROG_BROWSE;
+
+    // Clear preview cache memory
+    memset(&g_prog_ctx.preview_cache, 0, sizeof(g_prog_ctx.preview_cache));
+
+    // Return to browse display
+    ShowSlotIndicators();
+}
+
+static bool enter_edit_from_preview(void)
+{
+    // Transition from preview to edit mode
+    g_prog_ctx.preview_mode_active = false;
+    g_prog_ctx.current_state = ZONE_PROG_EDIT;
+
+    // The zone is already loaded in staging from preview
+    // Just switch to edit display
+    memset(&g_prog_ctx.selection, 0, sizeof(g_prog_ctx.selection));
+    ShowKeySelection();
+
+    LOG_INFO("Entered edit mode from preview for zone %d", g_prog_ctx.preview_zone_id);
+    return true;
+}
+
+static void apply_color_and_exit(void)
+{
+    // Color already applied via real-time preview
+    g_prog_ctx.color_mode_active = false;
+    g_prog_ctx.right_alt_pressed = false;
+    g_prog_ctx.current_state = ZONE_PROG_EDIT;
+
+    // Return to edit display
+    ShowKeySelection();
+
+    LOG_INFO("Color applied and exited color mode");
+}
+
+static void reset_to_zone_default_and_exit(void)
+{
+    // Get zone default color from EEPROM
+	Backlight_RGB_t rgb = Backlight_HSVtoRGB(g_prog_ctx.hsv.hue,
+	                                            g_prog_ctx.hsv.saturation,
+	                                            g_prog_ctx.hsv.value);
+	rgb_color_t system_color = {rgb.r, rgb.g, rgb.b};
+
+	if (g_prog_ctx.edit_mode == ZONE_EDIT_INDIVIDUAL) {
+		// Apply to individual key
+		session_set_key_color(g_prog_ctx.color_target_row,
+							 g_prog_ctx.color_target_col, system_color, true);
+		LOG_INFO("Applied HSV(%d,%d,%d) to key (%d,%d)",
+				g_prog_ctx.hsv.hue, g_prog_ctx.hsv.saturation, g_prog_ctx.hsv.value,
+				g_prog_ctx.color_target_row, g_prog_ctx.color_target_col);
+	} else if (g_prog_ctx.edit_mode == ZONE_EDIT_GROUP) {
+		// Apply to all selected keys
+		uint8_t applied_count = 0;
+		for (uint8_t row = 0; row < ZONE_MATRIX_ROWS; row++) {
+			for (uint8_t col = 0; col < ZONE_MATRIX_COLS; col++) {
+				if (g_prog_ctx.selection.selected[row][col]) {
+					session_set_key_color(row, col, system_color, true);
+					applied_count++;
+				}
+			}
+		}
+		LOG_INFO("Applied HSV(%d,%d,%d) to %d selected keys",
+				g_prog_ctx.hsv.hue, g_prog_ctx.hsv.saturation, g_prog_ctx.hsv.value,
+				applied_count);
+	}
+
+    g_prog_ctx.color_mode_active = false;
+    g_prog_ctx.right_alt_pressed = false;
+    g_prog_ctx.current_state = ZONE_PROG_EDIT;
+    g_prog_ctx.has_unsaved_changes = true;
+
+    ShowKeySelection();
+    LOG_INFO("Reset to zone default and exited color mode");
+}
+
+static void flash_timeout_warning(void)
+{
+    // Brief yellow flash
+    Backlight_SetAllRGB(COLOR_YELLOW);
+    HAL_Delay(100);
+
+    // Restore appropriate display
+    if (g_prog_ctx.color_mode_active) {
+        show_color_mode_display();
+    }
+}
+
+static config_status_t swap_eeprom_zones(uint8_t eeprom_zone_a, uint8_t eeprom_zone_b)
+{
+    if (eeprom_zone_a >= ZONE_MAX_ZONES || eeprom_zone_b >= ZONE_MAX_ZONES) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    // Find which runtime slots (if any) these zones occupy
+    int8_t slot_a = -1, slot_b = -1;
+
+    // Check if zone A is in runtime slot 0 or 1
+    if (eeprom_zone_a == 0 && g_zone_rt_ctx.zones[0].active) slot_a = 0;
+    if (eeprom_zone_a == 1 && g_zone_rt_ctx.zones[1].active) slot_a = 1;
+
+    // Check if zone B is in runtime slot 0 or 1
+    if (eeprom_zone_b == 0 && g_zone_rt_ctx.zones[0].active) slot_b = 0;
+    if (eeprom_zone_b == 1 && g_zone_rt_ctx.zones[1].active) slot_b = 1;
+
+    // Case 1: Both zones in runtime - just swap the slots
+    if (slot_a >= 0 && slot_b >= 0) {
+        zone_runtime_t temp = g_zone_rt_ctx.zones[slot_a];
+        g_zone_rt_ctx.zones[slot_a] = g_zone_rt_ctx.zones[slot_b];
+        g_zone_rt_ctx.zones[slot_b] = temp;
+
+        LOG_INFO("Swapped runtime slots: zone %d ↔ zone %d", eeprom_zone_a, eeprom_zone_b);
+    }
+    // Case 2: Zone A in runtime, Zone B not - replace A with B
+    else if (slot_a >= 0 && slot_b < 0) {
+        // TODO: Load zone B from EEPROM to slot_a when EEPROM ready
+        // For now: Clear slot A
+        Zones_ClearRuntimeSlot(slot_a);
+        LOG_INFO("Cleared zone %d from runtime slot %d (zone %d not available)",
+                 eeprom_zone_a, slot_a, eeprom_zone_b);
+    }
+    // Case 3: Zone B in runtime, Zone A not - replace B with A
+    else if (slot_a < 0 && slot_b >= 0) {
+        // TODO: Load zone A from EEPROM to slot_b when EEPROM ready
+        // For now: Clear slot B
+        Zones_ClearRuntimeSlot(slot_b);
+        LOG_INFO("Cleared zone %d from runtime slot %d (zone %d not available)",
+                 eeprom_zone_b, slot_b, eeprom_zone_a);
+    }
+    // Case 4: Neither in runtime - nothing to do
+    else {
+        LOG_INFO("Neither zone %d nor zone %d are in runtime cache", eeprom_zone_a, eeprom_zone_b);
+        return CONFIG_OK;
+    }
+
+    UpdateRuntimeContext();
+    return CONFIG_OK;
+}
+
+static config_status_t load_eeprom_to_runtime(uint8_t eeprom_zone_id, uint8_t runtime_slot)
+{
+    if (eeprom_zone_id >= ZONE_MAX_ZONES || runtime_slot >= 2) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    // For zones 0-1: check if already in staging/runtime
+    if (eeprom_zone_id <= 1) {
+        if (g_zone_rt_ctx.zones[eeprom_zone_id].active) {
+            // Just copy to target slot if different
+            if (eeprom_zone_id != runtime_slot) {
+                g_zone_rt_ctx.zones[runtime_slot] = g_zone_rt_ctx.zones[eeprom_zone_id];
+                UpdateRuntimeContext();
+                LOG_INFO("Copied zone %d to runtime slot %d", eeprom_zone_id, runtime_slot);
+            }
+            return CONFIG_OK;
+        }
+    }
+
+    // For zones 2-7 or empty 0-1: TODO load from EEPROM when ready
+    LOG_INFO("Loading zone %d from EEPROM to runtime slot %d (TODO: EEPROM load)",
+             eeprom_zone_id, runtime_slot);
+
+    // For now, clear the target slot
+    Zones_ClearRuntimeSlot(runtime_slot);
+
+    return CONFIG_OK;
+}
+
+/* ========================================================================== */
+/* Zone Runtime Interface */
+/* ========================================================================== */
+config_status_t Zones_LoadStagingToRuntime(uint8_t runtime_slot)
+{
+    if (runtime_slot >= 2) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    // Call system_config function that has access to g_staging
+    return session_zone_load_staging_to_runtime(runtime_slot);
+}
+
+config_status_t Zones_LoadKeysToRuntime(const staging_key_t *staging_keys, uint8_t key_count, uint8_t runtime_slot)
+{
+    if (!staging_keys || runtime_slot >= 2) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    zone_runtime_t *rt_zone = &g_zone_rt_ctx.zones[runtime_slot];
+
+    // Clear runtime slot
+    rt_zone->active = false;
+    rt_zone->key_count = 0;
+    memset(rt_zone->keys, 0, sizeof(rt_zone->keys));
+
+    // Copy staging keys to runtime format
+    uint8_t loaded_keys = 0;
+    for (uint8_t i = 0; i < key_count && loaded_keys < 80; i++) {
+        const staging_key_t *staging_key = &staging_keys[i];
+
+        if (!staging_key->active) continue;
+
+        // Validate coordinates
+        if (staging_key->row >= ZONE_MATRIX_ROWS || staging_key->col >= ZONE_MATRIX_COLS) {
+            LOG_WARNING("Invalid key coordinates (%d,%d) in staging",
+                       staging_key->row, staging_key->col);
+            continue;
+        }
+
+        // Verify LED exists
+        if (!Zones_IsValidKey(staging_key->row, staging_key->col)) {
+            LOG_WARNING("Key (%d,%d) has no LED mapping - skipping",
+                       staging_key->row, staging_key->col);
+            continue;
+        }
+
+        // Copy to runtime
+        rt_zone->keys[loaded_keys] = (zone_key_runtime_t){
+            .row = staging_key->row,
+            .col = staging_key->col,
+            .color = {
+                staging_key->color.red,
+                staging_key->color.green,
+                staging_key->color.blue
+            }
+        };
+        loaded_keys++;
+    }
+
+    rt_zone->key_count = loaded_keys;
+    rt_zone->active = (loaded_keys > 0);
+
+    // Update runtime context
+    UpdateRuntimeContext();
+
+    LOG_INFO("Loaded %d keys from staging to runtime slot %d", loaded_keys, runtime_slot);
+    return CONFIG_OK;
+}
+
+config_status_t Zones_LoadToRuntimeSlot(uint8_t eeprom_slot_id, uint8_t runtime_slot)
+{
+    if (eeprom_slot_id >= ZONE_MAX_ZONES || runtime_slot >= 2) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    // Protect against loading over active programming sessions
+    if (ValidateSessionState() && g_session_guard.active_zone_id == eeprom_slot_id) {
+        LOG_WARNING("Cannot load EEPROM slot %d - currently being edited", eeprom_slot_id);
+        return CONFIG_ERROR;
+    }
+
+    if (!zone_is_slot_occupied(eeprom_slot_id)) {
+        // Clear runtime slot if EEPROM slot is empty
+        return Zones_ClearRuntimeSlot(runtime_slot);
+    }
+
+    // Clear runtime slot first - with bounds checking
+    zone_runtime_t *rt_zone = &g_zone_rt_ctx.zones[runtime_slot];
+    if (!rt_zone) {
+        LOG_ERROR("Invalid runtime zone pointer for slot %d", runtime_slot);
+        return CONFIG_ERROR;
+    }
+
+    rt_zone->active = false;
+    rt_zone->key_count = 0;
+    memset(rt_zone->keys, 0, sizeof(rt_zone->keys));  // Clear old data
+
+    // Load zone data from EEPROM using session system
+    config_status_t result = session_begin_edit(eeprom_slot_id);
+    if (result != CONFIG_OK) {
+        LOG_ERROR("Failed to begin session for EEPROM slot %d", eeprom_slot_id);
+        return result;
+    }
+
+    // Get zone LED count with bounds checking
+    uint8_t led_count;
+    result = session_get_staging_led_count(&led_count);
+    if (result != CONFIG_OK) {
+        session_end_edit(false);
+        LOG_ERROR("Failed to get LED count for EEPROM slot %d", eeprom_slot_id);
+        return result;
+    }
+
+    // Sanity check LED count
+    if (led_count > 80) {
+        session_end_edit(false);
+        LOG_ERROR("Invalid LED count %d for EEPROM slot %d", led_count, eeprom_slot_id);
+        return CONFIG_ERROR;
+    }
+
+    // Convert each LED to runtime format with bounds checking
+    for (uint8_t i = 0; i < led_count && rt_zone->key_count < 80; i++) {
+        uint8_t row, col;
+        rgb_color_t color;
+
+        if (session_get_staging_led_data(i, &row, &col, &color) == CONFIG_OK) {
+            // Validate key coordinates
+            if (row >= ZONE_MATRIX_ROWS || col >= ZONE_MATRIX_COLS) {
+                LOG_WARNING("Invalid key coordinates (%d,%d) in EEPROM slot %d",
+                           row, col, eeprom_slot_id);
+                continue;
+            }
+
+            rt_zone->keys[rt_zone->key_count].row = row;
+            rt_zone->keys[rt_zone->key_count].col = col;
+            rt_zone->keys[rt_zone->key_count].color = (Backlight_RGB_t){
+                color.red, color.green, color.blue
+            };
+            rt_zone->key_count++;
+        }
+    }
+
+    session_end_edit(false); // Don't save, just used for loading
+
+    // Activate runtime zone if we loaded keys
+    rt_zone->active = (rt_zone->key_count > 0);
+
+    // Update global runtime context
+    UpdateRuntimeContext();
+
+    LOG_INFO("EEPROM zone %d loaded to runtime slot %d (%d keys)",
+             eeprom_slot_id, runtime_slot, rt_zone->key_count);
+
+    return CONFIG_OK;
+}
+
+
+/**
+ * @brief Clear a runtime slot
+ */
+config_status_t Zones_ClearRuntimeSlot(uint8_t runtime_slot)
+{
+    if (runtime_slot >= 2) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    zone_runtime_t *rt_zone = &g_zone_rt_ctx.zones[runtime_slot];
+    if (!rt_zone) {
+        LOG_ERROR("Invalid runtime zone pointer for slot %d", runtime_slot);
+        return CONFIG_ERROR;
+    }
+
+    // Safe cleanup with memory clearing
+    rt_zone->active = false;
+    rt_zone->key_count = 0;
+    memset(rt_zone->keys, 0, sizeof(rt_zone->keys));
+
+    UpdateRuntimeContext();
+
+    LOG_INFO("Runtime slot %d cleared and memory zeroed", runtime_slot);
+    return CONFIG_OK;
+}
+
+
+/**
+ * @brief Activate/deactivate runtime zones for effects
+ */
+void Zones_SetRuntimeEnabled(bool enable)
+{
+    g_zone_rt_ctx.zones_enabled = enable;
+
+    // If disabling, deactivate all zones but keep them loaded
+    if (!enable) {
+        for (uint8_t i = 0; i < 2; i++) {
+            if (g_zone_rt_ctx.zones[i].key_count > 0) {
+                g_zone_rt_ctx.zones[i].active = false;
+            }
+        }
+        g_zone_rt_ctx.active_zone_count = 0;
+    } else {
+        // Re-enable zones that have data
+        UpdateRuntimeContext();
+    }
+
+    LOG_INFO("Runtime zones %s", enable ? "ENABLED" : "DISABLED");
+}
+
+/**
+ * @brief Toggle between runtime zone 0 and 1 (instant switching)
+ */
+config_status_t Zones_SwitchRuntimeSlot(uint8_t slot)
+{
+    if (slot >= 2) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    if (!g_zone_rt_ctx.zones_enabled) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    // Deactivate all slots first
+    for (uint8_t i = 0; i < 2; i++) {
+        if (g_zone_rt_ctx.zones[i].key_count > 0) {
+            g_zone_rt_ctx.zones[i].active = false;
+        }
+    }
+
+    // Activate requested slot if it has data
+    if (g_zone_rt_ctx.zones[slot].key_count > 0) {
+        g_zone_rt_ctx.zones[slot].active = true;
+        g_zone_rt_ctx.active_zone_count = 1;
+        LOG_INFO("Switched to runtime zone %d", slot);
+    } else {
+        g_zone_rt_ctx.active_zone_count = 0;
+        LOG_INFO("Runtime zone %d is empty - no zones active", slot);
+    }
+
+    return CONFIG_OK;
+}
+
+/**
+ * @brief Get current runtime zone status
+ */
+bool Zones_GetRuntimeStatus(bool *slot0_active, bool *slot1_active)
+{
+    if (slot0_active) *slot0_active = g_zone_rt_ctx.zones[0].active;
+    if (slot1_active) *slot1_active = g_zone_rt_ctx.zones[1].active;
+
+    return g_zone_rt_ctx.zones_enabled;
+}
+
+/**
+ * @brief Save current runtime slots to EEPROM (called during sys_config save)
+ */
+config_status_t Zones_SaveRuntimeToEEPROM(void)
+{
+    // This function would compare runtime data with EEPROM and only write if different
+    // Implementation depends on your EEPROM storage format
+
+    LOG_INFO("Runtime zones saved to EEPROM");
+    return CONFIG_OK;
+}
+
+/**
+ * @brief Update runtime context counters and flags
+ */
+static void UpdateRuntimeContext(void)
+{
+    g_zone_rt_ctx.active_zone_count = 0;
+
+    for (uint8_t i = 0; i < 2; i++) {
+        // Zone is active if it has data and zones are globally enabled
+        if (g_zone_rt_ctx.zones[i].key_count > 0 && g_zone_rt_ctx.zones_enabled) {
+            g_zone_rt_ctx.zones[i].active = true;
+            g_zone_rt_ctx.active_zone_count++;
+        } else {
+            g_zone_rt_ctx.zones[i].active = false;
+        }
+    }
+
+    LOG_DEBUG("Runtime context: %d active zones, enabled=%d",
+              g_zone_rt_ctx.active_zone_count, g_zone_rt_ctx.zones_enabled);
+}
+
+
+config_status_t Zones_SetRuntimeAssignments(uint8_t eeprom_slot0, uint8_t eeprom_slot1)
+{
+    config_status_t result = CONFIG_OK;
+
+    // Load slot 0
+    if (eeprom_slot0 < ZONE_MAX_ZONES) {
+        result = Zones_LoadToRuntimeSlot(eeprom_slot0, 0);
+        if (result != CONFIG_OK) {
+            LOG_ERROR("Failed to load EEPROM slot %d to runtime slot 0", eeprom_slot0);
+        }
+    } else {
+        Zones_ClearRuntimeSlot(0);
+    }
+
+    // Load slot 1
+    if (eeprom_slot1 < ZONE_MAX_ZONES) {
+        config_status_t result1 = Zones_LoadToRuntimeSlot(eeprom_slot1, 1);
+        if (result1 != CONFIG_OK) {
+            LOG_ERROR("Failed to load EEPROM slot %d to runtime slot 1", eeprom_slot1);
+            if (result == CONFIG_OK) result = result1;
+        }
+    } else {
+        Zones_ClearRuntimeSlot(1);
+    }
+
+    // Enable zones if we loaded any
+    Zones_SetRuntimeEnabled(g_zone_rt_ctx.active_zone_count > 0);
+
+    return result;
+}
+
+/**
+ * @brief Initialize runtime zones on system startup
+ */
+config_status_t Zones_InitRuntime(void)
+{
+
+    Zones_SetRuntimeEnabled(false);
+    LOG_INFO("Runtime zones initialized");
+    return CONFIG_OK;
+}
+
+

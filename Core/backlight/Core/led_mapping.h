@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 typedef struct {
     uint8_t ic;          // 0 = IC1, 1 = IC2
@@ -25,7 +26,7 @@ typedef struct {
 extern const size_t RGB_LED_MAP_SIZE;
 extern const rgb_led_mapping_t RGB_LED_MAP[];
 const rgb_led_mapping_t* get_led_for_key(uint8_t row, uint8_t col);
-
-
+bool get_led_index_for_key(uint8_t row, uint8_t col, uint8_t *led_index);
+bool get_key_for_led_index(uint8_t led_index, uint8_t *row, uint8_t *col);
 
 #endif /* BACKLIGHT_CORE_LED_MAPPING_H_ */

@@ -10,7 +10,9 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "zones.h"
 #include "backlight.h"
+#include "system_config.h"
 
 /* ========================================================================== */
 /* Effect Configuration */
@@ -19,8 +21,8 @@
 #define EFFECT_UPDATE_INTERVAL_MS       25      // 40 FPS - smoother fades
 #define EFFECT_BREATHING_INTERVAL_MS    125     // 8 FPS - slower breathing
 #define EFFECT_MAX_DURATION_MS          5000    // Allow longer effects
-#define EFFECT_MIN_BRIGHTNESS           26       // Minimum effect brightness
-#define EFFECT_MAX_BRIGHTNESS           90      // Maximum effect brightness
+#define EFFECT_MIN_BRIGHTNESS           77       // Minimum effect brightness
+#define EFFECT_MAX_BRIGHTNESS           255      // Maximum effect brightness
 
 /* ========================================================================== */
 /* Effect Types */
@@ -30,9 +32,7 @@ typedef enum {
    EFFECT_FADE_IN,           // Power on / wake transitions
    EFFECT_FADE_OUT,          // Power off / sleep transitions
    EFFECT_BREATHING,         // Continuous breathing effect
-   EFFECT_COLOR_TRANSITION,   // Smooth color changes
-   EFFECT_ZONE_BREATHING,
-   EFFECT_ZONE_STATIC
+   EFFECT_COLOR_TRANSITION   // Smooth color changes
 } effect_type_t;
 
 typedef enum {
@@ -40,7 +40,8 @@ typedef enum {
    EFFECT_ERROR_INVALID_PARAM,
    EFFECT_ERROR_HARDWARE_FAIL,
    EFFECT_ERROR_TIMEOUT,
-   EFFECT_ERROR_MEMORY
+   EFFECT_ERROR_MEMORY,
+   EFFECT_COMPLETE,
 } effect_error_t;
 
 typedef enum {
@@ -65,7 +66,9 @@ typedef enum {
 typedef enum {
     LMP_BEHAVIOR_OFF = 0,            // Turn backlight completely off
     LMP_BEHAVIOR_DIM,                // Dim to low brightness, keep runtime effect
+	LMP_BEHAVIOR_SYSTEM_OFF			//System Backlight off runtime and lpm
 } lmp_behavior_t;
+
 
 typedef struct {
     // Global effect enable/disable
@@ -123,17 +126,15 @@ typedef struct {
    bool breathing_direction_up;
    bool hardware_ready;
 
-   // Zone-aware effects
-   bool zone_effect_active;
-   uint8_t active_zone_slot;
-   zone_storage_t zone_backup; // Backup of original zone colors
-   bool zone_backup_valid;
-
    // Error handling
    uint8_t error_count;
    uint8_t retry_count;
 
    user_effects_config_t config;
+
+   //Zones
+   bool zone_active;
+   uint8_t active_zone_slot;
 
    // Completion callback
    void (*on_complete)(effect_error_t error);
@@ -145,98 +146,27 @@ typedef struct {
 /* ========================================================================== */
 
 extern effect_state_t g_effect;
-
-/**
-* @brief Initialize effects system
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_Init(void);
-
-/**
-* @brief Process active effects - call from main loop
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_Process(void);
-
-/**
-* @brief Stop any active effect
-*/
 void Effects_Stop(void);
-
-/**
-* @brief Check if any effect is currently active
-* @return true if effect is running
-*/
+void Effects_Start(void);
 bool Effects_IsActive(void);
-
-/**
-* @brief Get current effect type
-* @return effect_type_t Current effect type
-*/
 effect_type_t Effects_GetCurrentType(void);
-
+void EffectsToggleBacklight(void);
 /* ========================================================================== */
 /* Fade Effects */
 /* ========================================================================== */
-/**
-* @brief Start complete startup sequence (Fade In → Runtime Effect)
-* @param callback Optional completion callback
-* @return effect_error_t Error code
-*/
+
 effect_error_t Effects_StartupSequence(void (*callback)(effect_error_t));
-
-/**
-* @brief Start runtime effect based on user configuration
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_StartRuntimeEffect(void);
-
-/**
-* @brief Handle LPM entry based on connection type and user config
-* @param is_usb_connected True if USB connected, false for BLE
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_EnterLPM(bool is_usb_connected);
-
-/**
-* @brief Handle LPM exit based on connection type and user config
-* @param is_usb_connected True if USB connected, false for BLE
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_ExitLPM(bool is_usb_connected);
-
-/**
-* @brief Manual effect enable via Fn+Spacebar (works even when effects_enabled=false)
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_ManualEnable(void);
-
-/**
-* @brief Update user configuration at runtime
-* @param config New user configuration
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_UpdateConfig(user_effects_config_t *config);
-/**
-* @brief Start fade in effect (power on, wake up)
-* @param trigger What triggered this fade
-* @param duration_ms Fade duration in milliseconds
-* @param target_brightness Target brightness (0-80)
-* @param callback Optional completion callback
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_StartFadeIn(effect_trigger_t trigger,
                                   uint16_t duration_ms,
                                   uint8_t target_brightness,
                                   void (*callback)(effect_error_t));
-
-/**
-* @brief Start fade out effect (power off, sleep)
-* @param trigger What triggered this fade
-* @param duration_ms Fade duration in milliseconds
-* @param callback Optional completion callback
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_StartFadeOut(effect_trigger_t trigger,
                                    uint16_t duration_ms,
                                    void (*callback)(effect_error_t));
@@ -245,26 +175,11 @@ effect_error_t Effects_StartFadeOut(effect_trigger_t trigger,
 /* Breathing Effects */
 /* ========================================================================== */
 
-/**
-* @brief Start breathing effect
-* @param min_brightness Minimum brightness (0-80)
-* @param max_brightness Maximum brightness (0-80)
-* @param cycle_duration_ms Full cycle duration in milliseconds
-* @param color Base color for breathing
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_StartBreathing(uint8_t min_brightness,
                                      uint8_t max_brightness,
                                      uint16_t cycle_duration_ms,
                                      Backlight_RGB_t color);
 
-/**
-* @brief Start breathing with current colors
-* @param min_brightness Minimum brightness (0-80)
-* @param max_brightness Maximum brightness (0-80)
-* @param cycle_duration_ms Full cycle duration in milliseconds
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_StartBreathingCurrent(uint8_t min_brightness,
                                             uint8_t max_brightness,
                                             uint16_t cycle_duration_ms);
@@ -273,13 +188,6 @@ effect_error_t Effects_StartBreathingCurrent(uint8_t min_brightness,
 /* Color Transition Effects */
 /* ========================================================================== */
 
-/**
-* @brief Start smooth color transition
-* @param target_color Target color to transition to
-* @param duration_ms Transition duration in milliseconds
-* @param callback Optional completion callback
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_StartColorTransition(Backlight_RGB_t target_color,
                                            uint16_t duration_ms,
                                            void (*callback)(effect_error_t));
@@ -294,111 +202,63 @@ effect_error_t Effects_StartColorCyclingBreathing(uint8_t min_brightness,
 
 effect_error_t Effects_IncreaseBrightness(void);
 effect_error_t Effects_DecreaseBrightness(void);
-/**
-* @brief Quick power-on fade with defaults
-* @param callback Optional completion callback
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_PowerOn(void (*callback)(effect_error_t));
-
-/**
-* @brief Quick power-off fade with defaults
-* @param callback Optional completion callback
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_PowerOff(void (*callback)(effect_error_t));
-
-/**
-* @brief Quick wake-up fade with defaults
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_WakeUp(void);
-
-/**
-* @brief Quick sleep fade with defaults
-* @param callback Optional completion callback
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_Sleep(void (*callback)(effect_error_t));
-
-/**
-* @brief Start idle breathing effect
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_IdleBreathing(void);
-
-/**
-* @brief Start low battery breathing effect (red)
-* @return effect_error_t Error code
-*/
 effect_error_t Effects_LowBatteryBreathing(void);
 
 /* ========================================================================== */
 /* Status and Diagnostics */
 /* ========================================================================== */
-
-/**
-* @brief Get effect progress (0-100%)
-* @return uint8_t Progress percentage
-*/
 uint8_t Effects_GetProgress(void);
-
-/**
-* @brief Get current effect error count
-* @return uint8_t Number of errors encountered
-*/
 uint8_t Effects_GetErrorCount(void);
-
-/**
-* @brief Reset error counters
-*/
 void Effects_ResetErrors(void);
-
-/**
-* @brief Get time remaining for current effect (ms)
-* @return uint32_t Time remaining in milliseconds
-*/
 uint32_t Effects_GetTimeRemaining(void);
 
 /* ========================================================================== */
 /* BLE Status Effects */
 /* ========================================================================== */
 
-/**
- * @brief Start BLE pairing mode effect (pulsing blue/cyan)
- * @return effect_error_t Error code
- */
 effect_error_t Effects_BLE_PairingActive(void);
-
-/**
- * @brief Start BLE pairing success effect (green flash)
- * @return effect_error_t Error code
- */
 effect_error_t Effects_BLE_PairingSuccess(void);
-
-/**
- * @brief Start BLE pairing failed effect (red flash)
- * @return effect_error_t Error code
- */
 effect_error_t Effects_BLE_PairingFailed(void);
-
-/**
- * @brief Start BLE device switch effect (cyan sweep)
- * @return effect_error_t Error code
- */
 effect_error_t Effects_BLE_DeviceSwitch(void);
-
-/**
- * @brief Start BLE connection status effect
- * @param connected true if connected, false if disconnected
- * @return effect_error_t Error code
- */
 effect_error_t Effects_BLE_ConnectionStatus(bool connected);
-
-/**
- * @brief Stop any active BLE effect
- * @return effect_error_t Error code
- */
 effect_error_t Effects_BLE_Stop(void);
+
+
+/* ========================================================================== */
+/* Zones */
+/* ========================================================================== */
+config_status_t Effects_ClearAllZones(void);
+config_status_t Effects_DeactivateZone(uint8_t slot_id);
+config_status_t Effects_ActivateZone(uint8_t slot_id);
+effect_error_t Effects_ToggleRuntimeZones(bool enable);
+effect_error_t Effects_SwitchRuntimeZone(uint8_t slot);
+void Effects_GetRuntimeZoneStatus(bool *zones_enabled, uint8_t *active_count,
+                                  bool *slot0_active, bool *slot1_active);
+bool Effects_HasRuntimeZones(void);
+
+/* ========================================================================
+ * CONFIGURATION MODE VISUAL EFFECTS
+ * ======================================================================== */
+void Effects_ConfigModeInit(void);
+void Effects_ConfigModeBreathing(void);
+void Effects_ConfigModeMenu(void);
+void Effects_ConfigModeZoneSlots(const bool slot_occupied[8]);
+void Effects_ConfigModeZoneEdit(void);
+void Effects_ConfigModeKeySelection(const uint8_t selected_keys[6][14]);
+void Effects_ConfigModeColorPreview(const uint8_t selected_keys[6][14], Backlight_RGB_t color);
+void Effects_ConfigModeEffectTypes(uint8_t current_type);
+void Effects_ConfigModeEffectPreview(uint8_t effect_type, uint16_t cycle_time_ms);
+void Effects_ConfigModeColorPresetPreview(uint8_t preset_index, Backlight_RGB_t color);
+void Effects_ConfigModePowerOptions(uint8_t usb_mode, uint8_t battery_mode);
+void Effects_ConfigModePowerPreview(uint8_t dim_percentage);
+void Effects_ConfigModeBrightnessOptions(uint8_t startup_mode);
+void Effects_ConfigModeBrightnessPreview(uint8_t test_brightness);
+void Effects_ConfigModeFlash(Backlight_RGB_t color, uint16_t duration_ms);
+void Effects_ConfigModeExit(void);
 
 #endif /* BACKLIGHT_CORE_EFFECTS_H_ */

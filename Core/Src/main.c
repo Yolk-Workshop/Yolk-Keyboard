@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <stdatomic.h>
 #include "bm71_config.h"
+#include "config_ui.h"
 
 /* Private function prototypes -----------------------------------------------*/
 static void MX_GPIO_Init(void);
@@ -20,6 +21,10 @@ static void MX_TIM2_Init(void);
 static void Init_TIM3(void);
 static void Init_TIM21(void);
 static void initWatchdog(void);
+static void Backlight_Processes(void);
+static void BLE_Process(void);
+static void KB_HID_Processes(void);
+static void System_Init_Sequence(void);
 
 /* Private variables --------------------------------------------------------*/
 // Global state flags
@@ -62,6 +67,80 @@ void logger_output(const char *message);
  */
 int main(void)
 {
+	System_Init_Sequence();
+
+	while (1)
+	{
+		//check_connection();
+		//if(switch_state == MODE_SWITCH_IN_PROGRESS) continue; XXX
+
+		Backlight_Processes();
+		KB_HID_Processes();
+		BLE_Process();
+		PM_Update();
+	}
+}
+
+static void Backlight_Processes(void){
+	Effects_Process();
+	config_ui_process();
+	check_config_ui_functions();
+}
+
+static void KB_HID_Processes(void){
+
+	if (scan_flag) {
+		scanKeyMatrix();
+		if (report_ready_flag == SET && !config_ui_is_active()) {
+			reportArbiter();
+			report_ready_flag = 0;
+		}
+
+		uint32_t primask = __get_PRIMASK();
+		__disable_irq();
+		scan_flag = 0;
+		__set_PRIMASK(primask);
+	}
+
+}
+
+static void BLE_Process(void){
+
+	if (g_connection_mode == CONNECTION_BLE) {
+		static uint32_t last_main_rx_check = 0;
+		uint32_t current_time = HAL_GetTick();
+
+		if (current_time - last_main_rx_check > 50) {
+			bm70_process_rx(&g_bm70);
+			last_main_rx_check = current_time;
+		}
+
+		if (bm7x_timer_flag) {
+			bm7x_timer_flag = false;
+
+			uint32_t ble_start = HAL_GetTick();
+			ble_periodic_status_check();
+			uint32_t ble_duration = HAL_GetTick() - ble_start;
+
+			if (ble_duration > 500) {
+				LOG_WARNING("BLE operation took %lu ms", ble_duration);
+			}
+		}
+	}
+
+	check_ble_key_functions();
+}
+
+static void initWatchdog(void)
+{
+    // Disable watchdog during debugging sessions
+    WDG_DisableInDebug();
+    // Initialize watchdog with 4-second timeout
+    WDG_Init(WDG_TIMEOUT);
+    LOG_INFO("Watchdog initialized with %d second timeout", WDG_TIMEOUT/1000);
+}
+
+static void System_Init_Sequence(void){
 	/* MCU Configuration--------------------------------------------------------*/
   	HAL_Init();
 	SystemClock_Config();
@@ -95,7 +174,7 @@ int main(void)
 	LOG_DEBUG("Timer 3 Interrupt Started");
 
 	Backlight_Init();
-
+	config_ui_init();
 	if (Effects_Init() != EFFECT_ERROR_NONE) {
 		LOG_ERROR("Effects system initialization failed");
 	} else {
@@ -118,79 +197,6 @@ int main(void)
 	initWatchdog();
 	startup_complete = 1;
 	LOG_INFO("System ready and running");
-
-	/* Main loop */
-	while (1)
-	{
-		// Process backlight effects (smooth animations)
-		Effects_Process();
-
-		//check_connection();
-		//if(switch_state == MODE_SWITCH_IN_PROGRESS) continue; XXX
-
-		if (scan_flag)
-		{
-			scanKeyMatrix();
-			if (report_ready_flag == SET)
-			{
-				reportArbiter();
-				report_ready_flag = 0;
-			}
-
-			uint32_t primask = __get_PRIMASK();
-			__disable_irq();
-			scan_flag = 0;
-			__set_PRIMASK(primask);
-		}
-
-		if (g_connection_mode == CONNECTION_BLE) {
-			static uint32_t last_main_rx_check = 0;
-			uint32_t current_time = HAL_GetTick();
-
-			if (current_time - last_main_rx_check > 50) {
-				bm70_process_rx(&g_bm70);
-				last_main_rx_check = current_time;
-			}
-
-			if (bm7x_timer_flag) {
-				bm7x_timer_flag = false;
-
-				uint32_t ble_start = HAL_GetTick();
-				ble_periodic_status_check();
-				uint32_t ble_duration = HAL_GetTick() - ble_start;
-
-				if (ble_duration > 500) {
-					LOG_WARNING("BLE operation took %lu ms", ble_duration);
-				}
-			}
-		}
-
-		check_ble_key_functions();
-
-		// Update power management state
-		PM_Update();
-
-		#ifdef DEBUG_POWER
-			// Debug power management every 5 seconds
-			static uint32_t last_debug_print = 0;
-			if (HAL_GetTick() - last_debug_print > 5000) {
-				LOG_INFO("PM state: %s, Events: %d",
-						 current_pm_state == PM_STATE_ACTIVE ? "ACTIVE" : "SLEEP",
-						 dbg_pm_events);
-				last_debug_print = HAL_GetTick();
-			}
-		#endif
-
-	}
-}
-
-static void initWatchdog(void)
-{
-    // Disable watchdog during debugging sessions
-    WDG_DisableInDebug();
-    // Initialize watchdog with 4-second timeout
-    WDG_Init(WDG_TIMEOUT);
-    LOG_INFO("Watchdog initialized with %d second timeout", WDG_TIMEOUT/1000);
 }
 
 /**

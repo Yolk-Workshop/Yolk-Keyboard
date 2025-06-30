@@ -12,6 +12,10 @@
 #include "eeprom_memory_map.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "led_mapping.h"
+
+#define MAX_STAGING_KEYS 80
+
 
 /* Status Codes */
 typedef enum {
@@ -19,8 +23,12 @@ typedef enum {
    CONFIG_ERROR,
    CONFIG_CRC_ERROR,
    CONFIG_INVALID_PARAMETER,
-   CONFIG_EEPROM_ERROR
+   CONFIG_EEPROM_ERROR,
+   CONFIG_NOT_FOUND,
+   CONFIG_TIMEOUT,
+   CONFIG_MEMORY_ERROR
 } config_status_t;
+
 
 /* Data Structures */
 typedef struct {
@@ -49,6 +57,23 @@ typedef struct {
    uint8_t dim_percentage;
    bool wake_on_keypress;
 } power_management_t;
+
+typedef struct {
+	uint8_t row : 3;        // 3 bits (0-5 rows)
+	uint8_t col : 4;        // 4 bits (0-13 cols)
+    rgb_color_t color;
+    bool active;
+    bool color_modified;
+} staging_key_t;
+
+
+typedef struct {
+    config_status_t (*load_keys_to_runtime)(const staging_key_t *keys, uint8_t count, uint8_t slot);
+    bool (*is_runtime_slot_occupied)(uint8_t runtime_slot);
+} zone_interface_t;
+
+// Function to set the callback
+void session_set_zone_interface(const zone_interface_t *interface);
 
 /* System Data API */
 config_status_t system_get_device_id(uint32_t *device_id);
@@ -86,12 +111,20 @@ config_status_t zone_get_led_indices(uint8_t zone_id, uint8_t *indices, uint8_t 
 config_status_t zone_set_led_indices(uint8_t zone_id, const uint8_t *indices, uint8_t count);
 
 /* Zone Assignment API */
+
 config_status_t zone_assign_get_key_zone(uint8_t key_id, uint8_t *zone_id);
 config_status_t zone_assign_set_key_zone(uint8_t key_id, uint8_t zone_id);
 config_status_t zone_assign_get_priority(uint8_t zone_id, uint8_t *priority);
 config_status_t zone_assign_set_priority(uint8_t zone_id, uint8_t priority);
 config_status_t zone_assign_is_global_enabled(bool *enabled);
 config_status_t zone_assign_set_global_enabled(bool enabled);
+bool zone_is_slot_occupied(uint8_t slot_id);
+config_status_t zone_get_basic_info(uint8_t slot_id, uint8_t *led_count,
+                                   rgb_color_t *primary_color, bool *enabled);
+config_status_t zone_get_led_indices_raw(uint8_t slot_id, uint8_t *indices,
+                                         uint8_t max_indices, uint8_t *actual_count);
+config_status_t zone_save_basic_data(uint8_t slot_id, uint8_t led_count,
+                                     const staging_key_t *keys);
 
 /* Zone Effects API */
 config_status_t effects_get_fade_time(uint16_t *fade_time_ms);
@@ -150,6 +183,13 @@ config_status_t session_commit_changes(void);
 config_status_t session_discard_changes(void);
 config_status_t session_backup_current_state(void);
 config_status_t session_restore_backup_state(void);
+config_status_t session_get_staging_led_count(uint8_t *led_count);
+config_status_t session_get_staging_led_data(uint8_t index, uint8_t *row,
+                                            uint8_t *col, rgb_color_t *color);
+config_status_t session_set_key_color(uint8_t row, uint8_t col, rgb_color_t color, bool type);
+config_status_t session_remove_key_color(uint8_t row, uint8_t col);
+config_status_t session_end_edit(bool save_changes);
+config_status_t session_zone_load_staging_to_runtime(uint8_t runtime_slot);
 
 /* Maintenance & Lifecycle API */
 config_status_t config_init(m24512e_handle_t *eeprom_handle);
@@ -159,5 +199,11 @@ config_status_t config_create_backup(void);
 config_status_t config_restore_backup(void);
 config_status_t config_perform_maintenance_update(void);  // Called from LPTIM handler
 uint32_t config_calculate_adaptive_interval(void);       // Returns next update interval in hours
+
+#define BACKLIGHT_TO_RGB(bl_color) \
+    ((rgb_color_t){(bl_color).r, (bl_color).g, (bl_color).b})
+
+#define RGB_TO_BACKLIGHT(rgb_color) \
+    ((Backlight_RGB_t){(rgb_color).red, (rgb_color).green, (rgb_color).blue})
 
 #endif /* SYSTEM_CONFIG_SYSTEM_CONFIG_H_ */

@@ -13,7 +13,7 @@
 /* ========================================================================== */
 
 // Colors that look amazing when breathing (smooth transitions)
-const Backlight_RGB_t breathing_colors[] = {
+Backlight_RGB_t breathing_colors[] = {
     COLOR_AMBER,            // 0 - Warm, soothing
     COLOR_ORANGE,           // 1 - Energetic
     COLOR_CORAL,            // 2 - Soft, pleasant
@@ -24,7 +24,7 @@ const Backlight_RGB_t breathing_colors[] = {
     COLOR_TEAL,             // 7 - Balanced
     COLOR_LIME,             // 8 - Fresh, vibrant
     COLOR_YELLOW,           // 9 - Bright, cheerful
-    COLOR_WARM_WHITE,       // 10 - Professional
+	COLOR_CREAM_WHITE,       // 10 - Professional
     COLOR_ROSE              // 11 - Gentle, warm
 };
 
@@ -43,7 +43,7 @@ const Backlight_RGB_t notification_colors[] = {
 const uint8_t notification_color_count = sizeof(notification_colors) / sizeof(notification_colors[0]);
 
 // Transition-friendly colors (gradual color changes)
-const Backlight_RGB_t transition_colors[] = {
+Backlight_RGB_t transition_colors[] = {
     COLOR_RED,              // 0
     COLOR_ORANGE,           // 1
     COLOR_YELLOW,           // 2
@@ -117,7 +117,7 @@ Backlight_RGB_t Color_GetTransition(uint8_t index)
 
 Backlight_RGB_t Color_Dim(Backlight_RGB_t color)
 {
-    return Color_Scale(color, 25);
+    return Color_Scale(color, 10);
 }
 
 Backlight_RGB_t Color_Bright(Backlight_RGB_t color)

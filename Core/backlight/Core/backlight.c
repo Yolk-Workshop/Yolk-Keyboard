@@ -22,36 +22,12 @@
 #define BACKLIGHT_I2C_TIMEOUT_MS        	50      // I2C operation timeout
 #define BACKLIGHT_FADE_UPDATE_INTERVAL_MS  	16   // ~60 FPS fade updates
 #define BACKLIGHT_MAX_FADE_STEPS        	32      // Maximum fade resolution
-#define BACKLIGHT_RGB_MAX_VALUE          	128     // Maximum RGB value
+#define BACKLIGHT_RGB_MAX_VALUE          	255     // Maximum RGB value
 #define BACKLIGHT_BRIGHTNESS_STEP        	10     // RGB step size for quick brightness adjustment
-#define BACKLIGHT_RGB_MIN_VALUE			 	10
+#define BACKLIGHT_RGB_MIN_VALUE			 	1
 /* ========================================================================== */
 /* Private Types */
 /* ========================================================================== */
-
-typedef enum {
-    FADE_IDLE = 0,
-    FADE_BRIGHTNESS,
-    FADE_COLOR_ALL,
-    FADE_COLOR_ZONE
-} fade_type_t;
-
-typedef struct {
-    fade_type_t type;
-    uint32_t start_time;
-    uint16_t duration_ms;
-    uint8_t current_step;
-    uint8_t total_steps;
-
-    // Start values
-    uint8_t start_brightness;
-    Backlight_RGB_t start_color;
-
-    // Target values
-    uint8_t target_brightness;
-    Backlight_RGB_t target_color;
-    Backlight_Zone_t target_zone;
-} fade_context_t;
 
 typedef struct {
     IS31FL_Context_t led_ctx;
@@ -82,88 +58,38 @@ typedef struct {
 } backlight_context_t;
 
 /* ========================================================================== */
-/* Zone Definitions */
-/* ========================================================================== */
-
-typedef struct {
-    uint8_t row, col;
-} key_position_t;
-
-// Zone key definitions (using your RGB_LED_MAP indices)
-static const key_position_t zone_function_keys[] = {
-    {0, 0}, {0, 1}, {0, 2}, {0, 3}, {0, 4}, {0, 5}, {0, 6},
-    {0, 7}, {0, 8}, {0, 9}, {0, 10}, {0, 11}, {0, 12}, {0, 13}
-};
-
-static const key_position_t zone_number_row[] = {
-    {1, 0}, {1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6},
-    {1, 7}, {1, 8}, {1, 9}, {1, 10}, {1, 11}, {1, 12}, {1, 13}
-};
-
-static const key_position_t zone_qwerty_row[] = {
-    {2, 0}, {2, 1}, {2, 2}, {2, 3}, {2, 4}, {2, 5}, {2, 6},
-    {2, 7}, {2, 8}, {2, 9}, {2, 10}, {2, 11}, {2, 12}, {2, 13}
-};
-
-static const key_position_t zone_asdf_row[] = {
-    {3, 0}, {3, 1}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6},
-    {3, 7}, {3, 8}, {3, 9}, {3, 10}, {3, 11}, {3, 12}, {3, 13}
-};
-
-static const key_position_t zone_zxcv_row[] = {
-    {4, 0}, {4, 1}, {4, 2}, {4, 3}, {4, 4}, {4, 5}, {4, 6},
-    {4, 7}, {4, 8}, {4, 9}, {4, 10}, {4, 11}, {4, 12}, {4, 13}
-};
-
-static const key_position_t zone_bottom_row[] = {
-    {5, 0}, {5, 1}, {5, 2}, {5, 3}, {5, 4}, {5, 5}, {5, 6},
-    {5, 7}, {5, 8}, {5, 9}
-};
-
-static const key_position_t zone_wasd[] = {
-    {2, 2}, {3, 1}, {3, 2}, {3, 3}  // W, A, S, D
-};
-
-static const key_position_t zone_arrow_keys[] = {
-    {4, 12}, {5, 7}, {5, 8}, {5, 9}  // UP, LEFT, DOWN, RIGHT
-};
-
-static const key_position_t zone_main_typing[] = {
-    // Numbers 1-0 and minus (row 1, cols 1-11)
-    {1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}, {1, 8}, {1, 9}, {1, 10}, {1, 11},
-    // Q to P (row 2, cols 1-10)
-    {2, 1}, {2, 2}, {2, 3}, {2, 4}, {2, 5}, {2, 6}, {2, 7}, {2, 8}, {2, 9}, {2, 10},
-    // A to L (row 3, cols 1-9)
-    {3, 1}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 7}, {3, 8}, {3, 9},
-    // Z to M (row 4, cols 2-8)
-    {4, 2}, {4, 3}, {4, 4}, {4, 5}, {4, 6}, {4, 7}, {4, 8}
-};
-
-
-/* ========================================================================== */
 /* Private Variables */
 /* ========================================================================== */
-
 static backlight_context_t g_ctx = {0};
 
-static const key_position_t zone_modifiers[] = {
-    {3, 0}, {4, 0}, {4, 13}, {5, 0}, {5, 1}, {5, 2}, {5, 3}, {5, 5}, {5, 6}
+static const uint8_t hue_brightness_correction[24] = {
+    255, 255, 242, 230, 191, 191, 204, 230, 255, 255, 242, 204,
+    191, 191, 217, 242, 255, 255, 255, 242, 242, 255, 255, 255
+};
+
+static const uint8_t hue_saturation_boost[24] = {
+	100,105,110,115,120,115,110,105,100,100,100,105,
+	110,105,100,100,100,100,105,110,115,110,105,100
+};
+
+static const int8_t hue_shift_correction[24] = {
+	0,0,-3,-5,-8,-5,-3,0,0,0,0,-3,
+	-5,-3,0,0,0,0,0,3,5,3,0,0
 };
 
 const uint8_t brightness_levels[11] = {
-    0,    // Level 0 - Off
-    10,   // Level 1 - Minimum visible
-    16,   // Level 2 - Very dim
-    26,   // Level 3 - Dim
-    38,   // Level 4 - Low
-    53,   // Level 5 - Medium-low
-    70,   // Level 6 - Medium
-    90,   // Level 7 - Medium-high
-    109,  // Level 8 - High
-    122,  // Level 9 - Very high
-    128   // Level 10 - Maximum
+    0,   // Level 0 - Off
+    20,  // Level 1 - Minimum visible
+    31,  // Level 2 - Very dim
+    51,  // Level 3 - Dim
+    77,  // Level 4 - Low
+    105, // Level 5 - Medium-low
+    140, // Level 6 - Medium
+    179, // Level 7 - Medium-high
+    217, // Level 8 - High
+    242, // Level 9 - Very high
+    255  // Level 10 - Maximum
 };
-
 
 /* ========================================================================== */
 /* Private Function Prototypes */
@@ -171,10 +97,7 @@ const uint8_t brightness_levels[11] = {
 
 static Backlight_Error_t InitDevices(void);
 static Backlight_Error_t UpdateLEDHardware(uint8_t row, uint8_t col, Backlight_RGB_t color);
-static Backlight_Error_t ApplyZone(Backlight_Zone_t zone, Backlight_RGB_t color);
-static const key_position_t* GetZoneKeys(Backlight_Zone_t zone, uint8_t *count);
-static uint8_t GetEffectiveMaxBrightness(void);
-
+static void Backlight_ReadThermalConfig(uint8_t device_idx);
 /* ========================================================================== */
 /* Private Functions */
 /* ========================================================================== */
@@ -474,9 +397,9 @@ Backlight_Error_t Backlight_Init(void)
 	// Initialize state flags
 	g_ctx.has_saved_state = false;
 	g_ctx.saved_global_max = 0;
-	g_ctx.global_brightness = BACKLIGHT_BRIGHTNESS_MEDIUM;
-	g_ctx.saved_brightness = BACKLIGHT_BRIGHTNESS_MEDIUM;
-	g_ctx.user_max_limit = 90;
+	g_ctx.global_brightness = BACKLIGHT_BRIGHTNESS_MAX;
+	g_ctx.saved_brightness = BACKLIGHT_BRIGHTNESS_MAX;
+	g_ctx.user_max_limit = 255;
 	g_ctx.user_min_limit = 0;
 	g_ctx.current_max_brightness = g_ctx.user_max_limit;
 
@@ -497,6 +420,9 @@ Backlight_Error_t Backlight_Init(void)
     	LOG_ERROR("Backlight LED Driver error");
         return result;
     }
+
+    Backlight_ReadThermalConfig(0); // Read master thermal config
+    Backlight_ReadThermalConfig(1); // Read slave thermal config
 
     Backlight_RGB_t color;
     color.b = 0;
@@ -890,130 +816,6 @@ Backlight_Error_t Backlight_SetAllBrightness(uint8_t brightness)
 }
 
 /* ========================================================================== */
-/* Zone Control */
-/* ========================================================================== */
-
-Backlight_Error_t Backlight_SetZoneRGB(Backlight_Zone_t zone, Backlight_RGB_t color)
-{
-    if (!g_ctx.initialized || zone >= BACKLIGHT_ZONE_COUNT) {
-        return BACKLIGHT_ERROR_PARAM;
-    }
-
-    // Limit RGB values to maximum allowed
-    Backlight_RGB_t limited_color = LimitRGBColor(color);
-
-    if (zone == BACKLIGHT_ZONE_ALL) {
-        return Backlight_SetAllRGB(limited_color);
-    }
-
-    return ApplyZone(zone, limited_color);
-}
-
-Backlight_Error_t Backlight_SetZone(Backlight_Zone_t zone, uint8_t r, uint8_t g, uint8_t b)
-{
-    Backlight_RGB_t color = {
-        .r = LimitRGBComponent(r),
-        .g = LimitRGBComponent(g),
-        .b = LimitRGBComponent(b)
-    };
-    return Backlight_SetZoneRGB(zone, color);
-}
-
-Backlight_Error_t Backlight_SetZoneRGBIntensity(Backlight_Zone_t zone, Backlight_RGB_t color, uint8_t intensity)
-{
-    if (!g_ctx.initialized || zone >= BACKLIGHT_ZONE_COUNT) {
-        return BACKLIGHT_ERROR_PARAM;
-    }
-
-    // Scale and limit color by intensity
-    Backlight_RGB_t scaled_color = {
-        .r = LimitRGBComponent((color.r * intensity) / 255),
-        .g = LimitRGBComponent((color.g * intensity) / 255),
-        .b = LimitRGBComponent((color.b * intensity) / 255)
-    };
-
-    if (zone == BACKLIGHT_ZONE_ALL) {
-        return Backlight_SetAllRGB(scaled_color);
-    }
-
-    return ApplyZone(zone, scaled_color);
-}
-
-Backlight_Error_t Backlight_SetZoneIntensity(Backlight_Zone_t zone, uint8_t r, uint8_t g, uint8_t b, uint8_t intensity)
-{
-    Backlight_RGB_t color = {r, g, b};
-    return Backlight_SetZoneRGBIntensity(zone, color, intensity);
-}
-
-Backlight_Error_t Backlight_SetZoneBrightness(Backlight_Zone_t zone, uint8_t brightness)
-{
-    uint8_t limited_brightness = LimitRGBComponent(brightness);
-    Backlight_RGB_t color = {limited_brightness, limited_brightness, limited_brightness};
-    return Backlight_SetZoneRGB(zone, color);
-}
-
-Backlight_Error_t Backlight_SetZoneOff(Backlight_Zone_t zone)
-{
-    Backlight_RGB_t color = {0, 0, 0};
-    return Backlight_SetZoneRGB(zone, color);
-}
-
-/* ========================================================================== */
-/* Pattern Loading */
-/* ========================================================================== */
-
-Backlight_Error_t Backlight_LoadPattern(const Backlight_RGB_t *pattern, uint16_t size)
-{
-    if (!g_ctx.initialized || !pattern) {
-        return BACKLIGHT_ERROR_PARAM;
-    }
-
-    uint16_t max_size = BACKLIGHT_MATRIX_ROWS * BACKLIGHT_MATRIX_COLS;
-    if (size > max_size) {
-        size = max_size;
-    }
-
-    uint16_t index = 0;
-    for (uint8_t row = 0; row < BACKLIGHT_MATRIX_ROWS && index < size; row++) {
-        for (uint8_t col = 0; col < BACKLIGHT_MATRIX_COLS && index < size; col++) {
-            if (Backlight_HasLED(row, col)) {
-                // Limit pattern colors before setting
-                Backlight_RGB_t limited_color = LimitRGBColor(pattern[index]);
-                Backlight_Error_t result = Backlight_SetKeyRGB(row, col, limited_color);
-                if (result != BACKLIGHT_OK) {
-                    return result;
-                }
-            }
-            index++;
-        }
-    }
-
-    return BACKLIGHT_OK;
-}
-
-Backlight_Error_t Backlight_SavePattern(Backlight_RGB_t *pattern, uint16_t size)
-{
-    if (!g_ctx.initialized || !pattern) {
-        return BACKLIGHT_ERROR_PARAM;
-    }
-
-    uint16_t max_size = BACKLIGHT_MATRIX_ROWS * BACKLIGHT_MATRIX_COLS;
-    if (size > max_size) {
-        size = max_size;
-    }
-
-    uint16_t index = 0;
-    for (uint8_t row = 0; row < BACKLIGHT_MATRIX_ROWS && index < size; row++) {
-        for (uint8_t col = 0; col < BACKLIGHT_MATRIX_COLS && index < size; col++) {
-            pattern[index] = g_ctx.current_colors[row][col];
-            index++;
-        }
-    }
-
-    return BACKLIGHT_OK;
-}
-
-/* ========================================================================== */
 /* Status and Diagnostics */
 /* ========================================================================== */
 
@@ -1071,6 +873,21 @@ Backlight_RGB_t Backlight_HSVtoRGB(uint16_t h, uint8_t s, uint8_t v)
         return rgb;
     }
 
+    // Apply perceptual corrections BEFORE conversion
+    uint8_t hue_index = ((h / 15) % 24);
+
+    // 1. Hue shift correction (if you have this table)
+    int16_t corrected_h = h + hue_shift_correction[hue_index];
+    if (corrected_h < 0) corrected_h += 360;
+    if (corrected_h >= 360) corrected_h -= 360;
+    h = (uint16_t)corrected_h;
+
+    // 2. Saturation boost for washed-out hues (using percentage)
+    uint16_t corrected_s = (s * hue_saturation_boost[hue_index]) / 100;
+    if (corrected_s > 100) corrected_s = 100;
+    s = (uint8_t)corrected_s;
+
+    // Standard HSV to RGB conversion
     h = h % 360;
     uint8_t region = h / 60;
     uint8_t remainder = (h - (region * 60)) * 6;
@@ -1086,25 +903,23 @@ Backlight_RGB_t Backlight_HSVtoRGB(uint16_t h, uint8_t s, uint8_t v)
     uint8_t t_scaled = LimitRGBComponent((t * 255) / 100);
 
     switch (region) {
-        case 0:
-            rgb.r = v_scaled; rgb.g = t_scaled; rgb.b = p_scaled;
-            break;
-        case 1:
-            rgb.r = q_scaled; rgb.g = v_scaled; rgb.b = p_scaled;
-            break;
-        case 2:
-            rgb.r = p_scaled; rgb.g = v_scaled; rgb.b = t_scaled;
-            break;
-        case 3:
-            rgb.r = p_scaled; rgb.g = q_scaled; rgb.b = v_scaled;
-            break;
-        case 4:
-            rgb.r = t_scaled; rgb.g = p_scaled; rgb.b = v_scaled;
-            break;
-        default:
-            rgb.r = v_scaled; rgb.g = p_scaled; rgb.b = q_scaled;
-            break;
+        case 0: rgb.r = v_scaled; rgb.g = t_scaled; rgb.b = p_scaled; break;
+        case 1: rgb.r = q_scaled; rgb.g = v_scaled; rgb.b = p_scaled; break;
+        case 2: rgb.r = p_scaled; rgb.g = v_scaled; rgb.b = t_scaled; break;
+        case 3: rgb.r = p_scaled; rgb.g = q_scaled; rgb.b = v_scaled; break;
+        case 4: rgb.r = t_scaled; rgb.g = p_scaled; rgb.b = v_scaled; break;
+        default: rgb.r = v_scaled; rgb.g = p_scaled; rgb.b = q_scaled; break;
     }
+
+    // 3. Apply brightness correction AFTER conversion (using 255 scale)
+    uint8_t brightness_correction = hue_brightness_correction[hue_index];
+    rgb.r = (rgb.r * brightness_correction) / 255;
+    rgb.g = (rgb.g * brightness_correction) / 255;
+    rgb.b = (rgb.b * brightness_correction) / 255;
+
+    // 4. Final warmth adjustment for more natural feel
+    if (rgb.r < 240) rgb.r += (255 - rgb.r) / 10; // +10% red boost
+    if (rgb.b > 20) rgb.b -= rgb.b / 12; // -8% blue reduction
 
     return rgb;
 }
@@ -1113,13 +928,6 @@ Backlight_RGB_t Backlight_RGB(uint8_t r, uint8_t g, uint8_t b)
 {
     Backlight_RGB_t color = {r, g, b};
     return color;
-}
-
-uint8_t Backlight_GetZoneKeyCount(Backlight_Zone_t zone)
-{
-    uint8_t count;
-    GetZoneKeys(zone, &count);
-    return count;
 }
 
 uint8_t Backlight_ApplyGamma(uint8_t linear_value)
@@ -1245,76 +1053,6 @@ static Backlight_Error_t UpdateLEDHardware(uint8_t row, uint8_t col, Backlight_R
     return BACKLIGHT_OK;
 }
 
-static Backlight_Error_t ApplyZone(Backlight_Zone_t zone, Backlight_RGB_t color)
-{
-    uint8_t count;
-    const key_position_t *keys = GetZoneKeys(zone, &count);
-
-    if (!keys) {
-        return BACKLIGHT_ERROR_PARAM;
-    }
-
-    for (uint8_t i = 0; i < count; i++) {
-        Backlight_Error_t result = Backlight_SetKeyRGB(keys[i].row, keys[i].col, color);
-        if (result != BACKLIGHT_OK && result != BACKLIGHT_ERROR_KEY_NOT_FOUND) {
-            return result;
-        }
-    }
-
-    return BACKLIGHT_OK;
-}
-
-static const key_position_t* GetZoneKeys(Backlight_Zone_t zone, uint8_t *count)
-{
-    if (!count) return NULL;
-
-    switch (zone) {
-        case BACKLIGHT_ZONE_FUNCTION_KEYS:
-            *count = sizeof(zone_function_keys) / sizeof(key_position_t);
-            return zone_function_keys;
-        case BACKLIGHT_ZONE_NUMBER_ROW:
-            *count = sizeof(zone_number_row) / sizeof(key_position_t);
-            return zone_number_row;
-        case BACKLIGHT_ZONE_QWERTY_ROW:
-            *count = sizeof(zone_qwerty_row) / sizeof(key_position_t);
-            return zone_qwerty_row;
-        case BACKLIGHT_ZONE_ASDF_ROW:
-            *count = sizeof(zone_asdf_row) / sizeof(key_position_t);
-            return zone_asdf_row;
-        case BACKLIGHT_ZONE_ZXCV_ROW:
-            *count = sizeof(zone_zxcv_row) / sizeof(key_position_t);
-            return zone_zxcv_row;
-        case BACKLIGHT_ZONE_BOTTOM_ROW:
-            *count = sizeof(zone_bottom_row) / sizeof(key_position_t);
-            return zone_bottom_row;
-        case BACKLIGHT_ZONE_WASD:
-            *count = sizeof(zone_wasd) / sizeof(key_position_t);
-            return zone_wasd;
-        case BACKLIGHT_ZONE_ARROW_KEYS:
-            *count = sizeof(zone_arrow_keys) / sizeof(key_position_t);
-            return zone_arrow_keys;
-        case BACKLIGHT_ZONE_MODIFIERS:
-            *count = sizeof(zone_modifiers) / sizeof(key_position_t);
-            return zone_modifiers;
-        case BACKLIGHT_ZONE_MAIN_TYPING:
-            *count = sizeof(zone_main_typing) / sizeof(key_position_t);
-            return zone_main_typing;
-        case BACKLIGHT_ZONE_ALPHAS:
-            // Define alphabetic keys only
-            *count = 26; // A-Z keys
-            // Note: You'd need to define static zone_alphas[] array
-            return NULL; // Simplified for now
-        case BACKLIGHT_ZONE_NUMBERS:
-            // Define numeric keys only
-            *count = 10; // 1-0 keys
-            // Note: You'd need to define static zone_numbers[] array
-            return NULL; // Simplified for now
-        default:
-            *count = 0;
-            return NULL;
-    }
-}
-
 /**
  * @brief Clear saved color state (use when setting new colors)
  */
@@ -1397,6 +1135,7 @@ Backlight_Error_t Backlight_ExitShutdown(void)
             success = false;
         } else {
             LOG_DEBUG("Master device exited software shutdown");
+            HAL_Delay(1);
         }
     }
 
@@ -1525,18 +1264,43 @@ uint8_t Backlight_GetUserMinLimit(void)
     return g_ctx.user_min_limit;
 }
 
-static uint8_t GetEffectiveMaxBrightness(void)
+void Backlight_ReadTemp(void){
+    uint8_t temp_raw = 0;
+    if (IS31FL_ReadTemperature(&g_ctx.led_ctx, 0, &temp_raw) == IS31FL_OK) {
+        uint8_t temp_celsius = IS31FL_TempToCelsius(temp_raw);
+        LOG_INFO("Master IC: %d°C (raw: 0x%02X)", temp_celsius, temp_raw);
+
+        if (temp_raw > 0) {
+            LOG_WARNING("Master IC in thermal protection mode!");
+        }
+    }
+
+    temp_raw = 0;
+    if (IS31FL_ReadTemperature(&g_ctx.led_ctx, 1, &temp_raw) == IS31FL_OK) {
+        uint8_t temp_celsius = IS31FL_TempToCelsius(temp_raw);
+        LOG_INFO("Slave IC: %d°C (raw: 0x%02X)", temp_celsius, temp_raw);
+
+        if (temp_raw > 0) {
+            LOG_WARNING("Slave IC in thermal protection mode!");
+        }
+    }
+}
+
+static void Backlight_ReadThermalConfig(uint8_t device_idx)
 {
-    // Return the current effective maximum, respecting user limits
-    uint8_t effective_max = g_ctx.current_max_brightness;
+    const char* device_name = (device_idx == 0) ? "Master" : "Slave";
 
-    // Clamp to user limits
-    if (effective_max > g_ctx.user_max_limit) {
-        effective_max = g_ctx.user_max_limit;
-    }
-    if (effective_max < g_ctx.user_min_limit) {
-        effective_max = g_ctx.user_min_limit;
-    }
+    uint8_t thermal_reg;
+    IS31FL_ReadThermalConfig(&g_ctx.led_ctx,device_idx,&thermal_reg);
 
-    return effective_max;
+    // Extract TS (bits 3:2) and TROF (bits 1:0)
+    uint8_t ts_bits = (thermal_reg >> 2) & 0x03;
+    uint8_t trof_bits = thermal_reg & 0x03;
+
+    // Convert to human readable values
+    uint8_t temp_c = (ts_bits == 0) ? 140 : (ts_bits == 1) ? 120 : (ts_bits == 2) ? 100 : 90;
+    uint8_t current_percent = (trof_bits == 0) ? 100 : (trof_bits == 1) ? 75 : (trof_bits == 2) ? 55 : 30;
+
+    LOG_INFO("%s thermal config: 0x%02X -> %d°C, %d%% current",
+             device_name, thermal_reg, temp_c, current_percent);
 }

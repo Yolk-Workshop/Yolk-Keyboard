@@ -15,46 +15,45 @@
 /* ========================================================================== */
 /* Color Configuration */
 /* ========================================================================== */
-
 // Full power values - no restrictions except blue whites
-#define COLOR_MAX_COMPONENT     128      // Maximum safe RGB component value
-#define COLOR_MIN_VISIBLE       10       // Minimum for visibility
-#define COLOR_OFF               0       // Completely off
+#define COLOR_MAX_COMPONENT 255 // Maximum safe RGB component value
+#define COLOR_MIN_VISIBLE   20  // Minimum for visibility
+#define COLOR_OFF           0   // Completely off
+#define BACKLIGHT_OFF       ((Backlight_RGB_t){0, 0, 0})
 
 // Pure colors at full intensity
-#define COLOR_RED               ((Backlight_RGB_t){128, 0, 0})
-#define COLOR_GREEN             ((Backlight_RGB_t){0, 128, 0})
-#define COLOR_BLUE              ((Backlight_RGB_t){0, 0, 128})
+#define COLOR_RED           ((Backlight_RGB_t){255, 0, 0})
+#define COLOR_GREEN         ((Backlight_RGB_t){0, 255, 0})
+#define COLOR_BLUE          ((Backlight_RGB_t){0, 0, 255})
 
 // Secondary colors - full saturation
-#define COLOR_YELLOW            ((Backlight_RGB_t){128, 122, 0})      // Pure yellow
-#define COLOR_CYAN              ((Backlight_RGB_t){0, 128, 128})      // Pure cyan
-#define COLOR_MAGENTA           ((Backlight_RGB_t){128, 0, 128})      // Pure magenta
+#define COLOR_YELLOW        ((Backlight_RGB_t){242, 51, 0})  // Pure yellow
+#define COLOR_CYAN          ((Backlight_RGB_t){0, 255, 255}) // Pure cyan
+#define COLOR_MAGENTA       ((Backlight_RGB_t){255, 0, 255}) // Pure magenta
 
 // Vibrant mixed colors
-#define COLOR_ORANGE            ((Backlight_RGB_t){128, 64, 0})       // Vibrant orange
-#define COLOR_PURPLE            ((Backlight_RGB_t){85, 0, 128})       // Deep purple
-#define COLOR_PINK              ((Backlight_RGB_t){128, 0, 43})       // Hot pink
-#define COLOR_LIME              ((Backlight_RGB_t){85, 128, 0})       // Bright lime
-#define COLOR_TEAL              ((Backlight_RGB_t){0, 128, 85})       // Rich teal
-#define COLOR_CORAL             ((Backlight_RGB_t){128, 64, 43})      // Coral
+#define COLOR_ORANGE        ((Backlight_RGB_t){255, 128, 0})  // Vibrant orange
+#define COLOR_PURPLE        ((Backlight_RGB_t){168, 0, 255})  // Deep purple
+#define COLOR_PINK          ((Backlight_RGB_t){255, 0, 87})   // Hot pink
+#define COLOR_LIME          ((Backlight_RGB_t){168, 255, 0})  // Bright lime
+#define COLOR_TEAL          ((Backlight_RGB_t){0, 255, 168})  // Rich teal
+#define COLOR_CORAL         ((Backlight_RGB_t){255, 128, 87}) // Coral
 
 // Warm whites - avoid blue-heavy combinations
-#define COLOR_WARM_WHITE        ((Backlight_RGB_t){128, 64, 0})      // Incandescent warm
-#define COLOR_SOFT_WHITE        ((Backlight_RGB_t){128, 107, 43})    // Soft warm
-#define COLOR_CREAM_WHITE       ((Backlight_RGB_t){128, 85, 43})     // Creamy warm
-#define COLOR_AMBER_WHITE       ((Backlight_RGB_t){128, 85, 0})      // Amber-tinted
+#define COLOR_WARM_WHITE    ((Backlight_RGB_t){255, 217, 13}) // Incandescent warm
+#define COLOR_SOFT_WHITE    ((Backlight_RGB_t){255, 217, 51}) // Soft warm
+#define COLOR_CREAM_WHITE   ((Backlight_RGB_t){255, 217, 20}) // Creamy warm
+#define COLOR_AMBER_WHITE   ((Backlight_RGB_t){255, 217, 0})  // Amber-tinted
 
 // Specialty colors
-#define COLOR_AMBER             ((Backlight_RGB_t){128, 43, 0})       // Pure amber
-#define COLOR_GOLD              ((Backlight_RGB_t){128, 85, 0})       // Golden
-#define COLOR_CRIMSON           ((Backlight_RGB_t){128, 0, 21})       // Deep red
-#define COLOR_FOREST_GREEN      ((Backlight_RGB_t){0, 128, 21})       // Deep green
-#define COLOR_ROYAL_BLUE        ((Backlight_RGB_t){21, 0, 128})       // Deep blue
-#define COLOR_VIOLET            ((Backlight_RGB_t){107, 0, 85})       // True violet
-#define COLOR_TURQUOISE         ((Backlight_RGB_t){0, 128, 128})      // Turquoise
-#define COLOR_ROSE              ((Backlight_RGB_t){128, 21, 43})      // Rose pink
-
+#define COLOR_AMBER         ((Backlight_RGB_t){255, 87, 0})   // Pure amber
+#define COLOR_GOLD          ((Backlight_RGB_t){255, 168, 0})  // Golden
+#define COLOR_CRIMSON       ((Backlight_RGB_t){255, 5, 13})  // Deep red
+#define COLOR_FOREST_GREEN  ((Backlight_RGB_t){0, 255, 41})   // Deep green
+#define COLOR_ROYAL_BLUE    ((Backlight_RGB_t){41, 0, 255})   // Deep blue
+#define COLOR_VIOLET        ((Backlight_RGB_t){214, 0, 168})  // True violet
+#define COLOR_TURQUOISE     ((Backlight_RGB_t){0, 255, 255})  // Turquoise
+#define COLOR_ROSE          ((Backlight_RGB_t){255, 41, 87})  // Rose pink
 /* ========================================================================== */
 /* Themed Color Sets */
 /* ========================================================================== */
@@ -90,7 +89,7 @@
 /* ========================================================================== */
 
 // Colors that look amazing when breathing (smooth transitions)
-extern const Backlight_RGB_t breathing_colors[];
+extern Backlight_RGB_t breathing_colors[];
 extern const uint8_t breathing_color_count;
 
 // High contrast colors for notifications/effects
@@ -98,7 +97,7 @@ extern const Backlight_RGB_t notification_colors[];
 extern const uint8_t notification_color_count;
 
 // Transition-friendly colors (gradual color changes)
-extern const Backlight_RGB_t transition_colors[];
+extern Backlight_RGB_t transition_colors[];
 extern const uint8_t transition_color_count;
 
 // Gamma correction tables

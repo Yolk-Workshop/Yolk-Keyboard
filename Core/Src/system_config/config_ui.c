@@ -1,209 +1,1404 @@
 /*
- * config_ui.c - Complete Configuration UI Implementation
+ * config_ui.c - Master Configuration System Controller
  *
- *  Created on: Jun 13, 2025
- *      Author: bettysidepiece
+ * Implements the complete Yolk keyboard configuration architecture:
+ * - Master Entry: Fn+Space+Enter for 5 seconds
+ * - Section Navigation: 1=Zones, 2=Effects, 3=Power, 4=Brightness
+ * - Universal Controls: Fn+S (save all), Fn+L (cancel all), Fn+Esc (menu)
+ * - Unified Session Management with atomic operations
+ * - 10-minute auto-timeout with warning
  */
 
 #include "config_ui.h"
-#include "colors.h"
-#include "led_mapping.h"
-#include "backlight.h"
-#include "effects.h"
 #include "zones.h"
+#include "effects.h"
+#include "backlight.h"
+#include "keys.h"
 #include "logger.h"
 #include "pmsm.h"
-#include "keys.h"
+#include "colors.h"
 #include <string.h>
 
 /* ========================================================================
- * PRIVATE CONSTANTS
+ * MASTER CONFIGURATION CONSTANTS
  * ======================================================================== */
+#define FN_HOLD_TIME_MS    					1000
+#define CONFIG_ENTRY_HOLD_TIME_MS           5000    // Fn+R_Alt+Enter hold time
+#define CONFIG_SESSION_TIMEOUT_MS           600000  // 10 minutes
+#define CONFIG_TIMEOUT_WARNING_MS           540000  // 9 minutes (1 min warning)
+#define CONFIG_VISUAL_UPDATE_INTERVAL_MS    100
+#define CONFIG_MAX_SESSION_ERRORS           5
 
-#define CONFIG_SECTION_COLOR        COLOR_GREEN
-#define CONFIG_ACTIVE_COLOR         COLOR_CYAN
-#define CONFIG_SAVE_COLOR           COLOR_GREEN
-#define CONFIG_CANCEL_COLOR         COLOR_RED
-#define CONFIG_WARNING_COLOR        COLOR_YELLOW
-#define CONFIG_DIM_COLOR            Color_Dim(COLOR_WARM_WHITE)
+// Visual feedback colors
+#define CONFIG_SECTION_INDICATOR_COLOR      Color_Bright(COLOR_GREEN)
+#define CONFIG_ACTIVE_SECTION_COLOR         Color_Bright(COLOR_CYAN)
+#define CONFIG_SAVE_SUCCESS_COLOR           Color_Bright(COLOR_GREEN)
+#define CONFIG_CANCEL_COLOR                 Color_Bright(COLOR_RED)
+#define CONFIG_WARNING_COLOR                Color_Bright(COLOR_YELLOW)
+#define CONFIG_BREATHING_COLOR              Color_Dim(COLOR_CREAM_WHITE)
 
-#define CONFIG_FLASH_DURATION_MS    300
-#define CONFIG_BREATH_MIN           10
-#define CONFIG_BREATH_MAX           60
+// Section key mappings (number row)
+#define SECTION_ZONES_KEY_COL               1       // Key "1"
+#define SECTION_EFFECTS_KEY_COL             2       // Key "2"
+#define SECTION_POWER_KEY_COL               3       // Key "3"
+#define SECTION_BRIGHTNESS_KEY_COL          4       // Key "4"
+#define SECTION_KEY_ROW                     1       // Number row
 
-#define CONFIG_ENTRY_HOLD_TIME_MS   5000
-#define CONFIG_AUTO_TIMEOUT_MS      600000  // 10 minutes
-#define CONFIG_TIMEOUT_WARNING_MS   540000  // 9 minutes
-#define CONFIG_VISUAL_UPDATE_MS     100
-#define CONFIG_MAX_ERRORS           5
+#define EFFECTS_COLOR_KEY_ROW           3       // Row for color selection (asdfghjkl;')
+#define EFFECTS_HSV_TIMEOUT_MS          300000  // 5 minutes
+#define EFFECTS_HSV_WARNING_MS          285000  // 4:45 warning
 
-#define CONFIG_SECTION_ROW          1       // Number row
+
 
 /* ========================================================================
- * GLOBAL STATE
+ * MASTER CONFIGURATION STATE
  * ======================================================================== */
 
-static config_ui_context_t g_config_ctx = {0};
-static bool g_initialized = false;
+typedef enum {
+    MASTER_STATE_IDLE = 0,              // Normal operation
+    MASTER_STATE_ENTRY_SEQUENCE,        // Detecting Fn+Space+Enter
+    MASTER_STATE_MAIN_MENU,             // Section selection (1-4)
+    MASTER_STATE_ZONE_PROGRAMMING,      // Zone configuration active
+    MASTER_STATE_EFFECTS_CONFIG,        // Effects configuration active
+    MASTER_STATE_POWER_CONFIG,          // Power management active
+    MASTER_STATE_BRIGHTNESS_CONFIG      // Brightness control active
+} master_config_state_t;
 
-// Simple global flag for blocking HID reports
+
+typedef enum {
+    EFFECTS_STATE_MODE_AND_COLOR,   // Normal mode/color selection
+    EFFECTS_STATE_HSV_EDIT         // HSV editing active
+} effects_config_state_t;
+
+typedef struct {
+    // Master state
+    master_config_state_t state;
+    master_config_state_t previous_state;
+
+    // Entry sequence tracking
+    uint32_t entry_sequence_start_time;
+    bool fn_pressed;
+    bool space_pressed;
+    bool enter_pressed;
+    bool entry_sequence_active;
+    bool entry_sequence_complete;
+
+    // Unified session management
+    uint32_t session_start_time;
+    uint32_t last_activity_time;
+    bool session_active;
+    bool has_unsaved_changes;
+    uint8_t sections_modified_mask;     // Bitmask: bit0=zones, bit1=effects, bit2=power, bit3=brightness
+
+    // Subsystem session states
+    bool zones_session_active;
+    bool effects_changes_pending;
+    bool power_changes_pending;
+    bool brightness_changes_pending;
+
+    // Timeout and safety
+    bool timeout_warning_shown;
+    uint8_t error_count;
+    config_status_t last_error;
+
+    // Visual feedback
+    uint32_t last_visual_update;
+    uint8_t breathing_phase;
+    bool breathing_direction_up;
+    bool menu_indicators_active;
+
+    // Saved state for restoration
+	bool saved_effects_enabled;
+	lmp_behavior_t saved_usb_lmp_behavior;
+	lmp_behavior_t saved_ble_lmp_behavior;
+	bool temp_enabled_for_config;
+
+	// Effects configuration state
+	effects_config_state_t effects_state;
+	uint8_t effects_editing_color_index;    // Which color being edited
+	uint32_t effects_hsv_start_time;        // HSV edit session timer
+
+	bool right_alt_pressed;
+
+	struct {
+		uint16_t hue;           // 0-359
+		uint8_t saturation;     // 0-100
+		uint8_t value;          // 1-100
+		uint8_t hue_step;       // Step size for hue
+		uint8_t sv_step;        // Step size for sat/val
+	} effects_hsv;
+
+} master_config_context_t;
+
+static struct {
+    bool fn_blocking_active;        // In blocking state
+    uint32_t fn_press_start_time;   // When Fn was first pressed
+    bool fn_pressed;                // Current Fn state
+    uint8_t fn_row, fn_col;        // Fn key position
+} g_blocking_state = {0};
+
+
+static master_config_context_t g_master_config = {0};
+static bool g_master_initialized = false;
+
+// Global flag to block HID reports during configuration
 bool g_config_ui_active = false;
+extern keyboard_state_t kb_state;
+extern effect_state_t g_effect;
+
+
 
 /* ========================================================================
- * PRIVATE FUNCTION PROTOTYPES
+ * PRIVATE FUNCTIONS
  * ======================================================================== */
 
-// Core system functions
-static config_status_t setup_config_mode_environment(void);
-static config_status_t restore_normal_environment(void);
-static void update_activity_time(void);
-static bool check_timeout_conditions(void);
+static void blocking_state_enter(void);
+static void blocking_state_exit(void);
+static bool blocking_state_handle_key(uint8_t row, uint8_t col, bool pressed);
+static void blocking_state_process(void);
+static void blocking_state_update_visual(void);
+static void update_power_config_backlight(void);
 
-// Entry sequence
-static void reset_entry_sequence(void);
-static bool update_entry_sequence(uint8_t keycode, bool pressed);
-static bool is_entry_sequence_complete(void);
+// Section-specific save/cancel operations
+static bool config_ui_save_current_section(void);
+static bool config_ui_cancel_current_section(void);
 
-// Key processing
-static bool is_universal_command(uint8_t row, uint8_t col, bool fn_pressed);
-static universal_command_t detect_universal_command(uint8_t row, uint8_t col, bool fn_pressed);
-static config_status_t process_universal_command(universal_command_t cmd);
-static bool is_section_key(uint8_t row, uint8_t col);
-static uint8_t get_section_from_key(uint8_t row, uint8_t col);
-
-// State management
-static config_status_t enter_state(config_ui_state_t new_state);
-static config_status_t exit_current_state(void);
-
-// Section FSM implementations
-static config_status_t process_menu_state(uint8_t row, uint8_t col, bool pressed);
-static config_status_t process_zone_config_fsm(uint8_t row, uint8_t col, bool pressed);
-static config_status_t process_effects_config_fsm(uint8_t row, uint8_t col, bool pressed);
-static config_status_t process_power_config_fsm(uint8_t row, uint8_t col, bool pressed);
-static config_status_t process_brightness_config_fsm(uint8_t row, uint8_t col, bool pressed);
-
-// Visual feedback
-static void setup_config_mode_lighting(void);
-static void update_breathing_effect(void);
-static void show_section_indicators(void);
-static void flash_confirmation(Backlight_RGB_t color, uint16_t duration_ms);
-
-// Error handling
-static config_status_t handle_error(config_status_t error);
+static config_status_t config_ui_save_zone_section(void);
+static config_status_t config_ui_cancel_zone_section(void);
+static config_status_t config_ui_save_effects_section(void);
+static config_status_t config_ui_cancel_effects_section(void);
+static config_status_t config_ui_save_power_section(void);
+static config_status_t config_ui_cancel_power_section(void);
+static config_status_t config_ui_save_brightness_section(void);
+static config_status_t config_ui_cancel_brightness_section(void);
 
 /* ========================================================================
- * PUBLIC API IMPLEMENTATION
+ * EFFECTS CONFIGURATION - STATIC FUNCTION PROTOTYPES
+ * ======================================================================== */
+
+// Utility functions
+static uint8_t effects_col_to_color_index(uint8_t col);
+static bool effects_is_color_editable(uint8_t color_index);
+static bool effects_is_color_valid(uint8_t color_index);
+
+// Visual display functions
+static void update_effects_config_display(void);
+static void show_effects_mode_indicators(void);
+static void show_effects_color_indicators(void);
+static void show_effects_hsv_display(void);
+
+// HSV editing functions
+static config_status_t effects_enter_hsv_mode(uint8_t color_index);
+static void effects_exit_hsv_mode(bool apply_changes);
+static config_status_t effects_adjust_hue(int8_t direction);
+static config_status_t effects_adjust_saturation(int8_t direction);
+static config_status_t effects_adjust_value(int8_t direction);
+
+// Key handler functions
+static bool handle_effects_mode_selection(uint8_t col);
+static bool handle_effects_color_selection(uint8_t col);
+static bool handle_effects_hsv_keys(uint8_t row, uint8_t col);
+static bool handle_effects_right_alt_combinations(uint8_t row, uint8_t col);
+/* ========================================================================
+ * BLOCKING STATE MANAGEMENT
+ * ======================================================================== */
+
+static void blocking_state_enter(void)
+{
+    g_blocking_state.fn_blocking_active = true;
+
+    // Visual feedback - flash yellow then show commands
+    Backlight_SetAllRGB(Color_Dim(COLOR_YELLOW));
+    HAL_Delay(100);
+    Backlight_SetAllRGB((Backlight_RGB_t){0, 0, 0});
+
+    // Show available commands
+    Backlight_SetKeyRGB(3, 2, COLOR_GREEN);    // S = Green (Save)
+    Backlight_SetKeyRGB(3, 9, COLOR_CRIMSON);    // L = Red (Cancel)
+}
+
+static void blocking_state_exit(void)
+{
+    g_blocking_state.fn_blocking_active = false;
+
+    Backlight_SetAllRGB((Backlight_RGB_t){0, 0, 0});
+    switch (g_master_config.state) {
+		case MASTER_STATE_ZONE_PROGRAMMING:
+			Zone_Return_to_Section(g_blocking_state.fn_pressed);
+			break;
+		case MASTER_STATE_EFFECTS_CONFIG:
+			config_ui_enter_effects();
+			break;
+		case MASTER_STATE_POWER_CONFIG:
+			config_ui_enter_power();
+			break;
+		case MASTER_STATE_BRIGHTNESS_CONFIG:
+			config_ui_enter_brightness();
+			break;
+		default:
+			break;
+	}
+    LOG_INFO("Exiting Fn blocking state");
+}
+
+static bool blocking_state_handle_key(uint8_t row, uint8_t col, bool pressed)
+{
+    // Handle Fn key for zone programming mode only
+    if (g_master_config.state == MASTER_STATE_MAIN_MENU) {
+    	return false;
+    }
+
+    if(isZoneHSVMode()) return false;
+
+    // Track Fn key presses/releases
+    if (row == g_blocking_state.fn_row && col == g_blocking_state.fn_col) {
+        if (pressed && !g_blocking_state.fn_pressed) {
+            // Fn just pressed - start timing
+            g_blocking_state.fn_pressed = true;
+            g_blocking_state.fn_press_start_time = HAL_GetTick();
+            LOG_DEBUG("Fn pressed - starting 2s timer");
+
+        } else if (!pressed && g_blocking_state.fn_pressed) {
+            // Fn released
+            g_blocking_state.fn_pressed = false;
+
+            if (g_blocking_state.fn_blocking_active) {
+                blocking_state_exit();
+                return true; // Consume the Fn release
+            }
+        }
+
+        // If in blocking state, consume Fn events
+        if (g_blocking_state.fn_blocking_active) {
+            return true;
+        }
+        return false; // Let normal processing handle Fn
+    }
+
+    // If in blocking state, handle command keys or block others
+    if (g_blocking_state.fn_blocking_active && pressed) {
+        uint8_t keycode = layers[BASE_LAYER][row][col];
+
+        switch (keycode) {
+            case KC_S:
+                LOG_INFO("Blocking state: Save command");
+                return config_ui_save_current_section();
+            case KC_L:
+                LOG_INFO("Blocking state: Cancel command");
+                return config_ui_cancel_current_section();
+
+            default:
+                // Block all other keys in blocking state
+                LOG_DEBUG("Blocking state: Key 0x%02X blocked", keycode);
+                return true;
+        }
+    }
+
+    return false; // Not handled by blocking state
+}
+
+static void blocking_state_process(void)
+{
+
+	if(isZoneHSVMode() || g_master_config.state == MASTER_STATE_MAIN_MENU){
+		g_blocking_state.fn_pressed = false;
+		g_blocking_state.fn_blocking_active = false;
+		return;
+	}
+
+
+    if(g_master_config.state != MASTER_STATE_MAIN_MENU &&
+		!kb_state.fn_pressed &&
+		g_blocking_state.fn_blocking_active){
+
+		g_blocking_state.fn_pressed = false;
+		blocking_state_exit();
+	}
+
+
+    // Check for Fn blocking state activation in zone programming
+	if (g_master_config.state != MASTER_STATE_MAIN_MENU &&
+		g_blocking_state.fn_pressed &&
+		!g_blocking_state.fn_blocking_active) {
+
+		uint32_t hold_duration = HAL_GetTick() - g_blocking_state.fn_press_start_time;
+
+		if (hold_duration >= FN_HOLD_TIME_MS) {
+			blocking_state_enter();
+		}
+	}
+
+
+}
+
+static void blocking_state_update_visual(void)
+{
+    // Maintain command indicators if in blocking state
+    if (g_blocking_state.fn_blocking_active) {
+        Backlight_SetKeyRGB(3, 2, (Backlight_RGB_t){0, 50, 0});    // S = Green
+        Backlight_SetKeyRGB(3, 9, (Backlight_RGB_t){50, 0, 0});    // L = Red
+    }
+}
+
+/* ========================================================================
+ * MASTER SYSTEM INITIALIZATION
  * ======================================================================== */
 
 config_status_t config_ui_init(void)
 {
-    if (g_initialized) {
+    if (g_master_initialized) {
         return CONFIG_OK;
     }
 
-    memset(&g_config_ctx, 0, sizeof(g_config_ctx));
+    LOG_INFO("Initializing master configuration system...");
 
-    g_config_ctx.current_state = CONFIG_UI_IDLE;
-    g_config_ctx.session.timeout_duration_ms = CONFIG_AUTO_TIMEOUT_MS;
-    g_config_ctx.session.auto_timeout_enabled = true;
+    memset(&g_master_config, 0, sizeof(g_master_config));
+    memset(&g_blocking_state, 0, sizeof(g_blocking_state));
+    g_master_config.state = MASTER_STATE_IDLE;
 
+    // Initialize all subsystems
+    if (Zones_Init() != CONFIG_OK) {
+        LOG_ERROR("Failed to initialize zones subsystem");
+        return CONFIG_ERROR;
+    }
+
+    g_master_initialized = true;
     g_config_ui_active = false;
-    reset_entry_sequence();
+	g_blocking_state.fn_row = 5;
+	g_blocking_state.fn_col = 0;
 
-    g_initialized = true;
-    LOG_INFO("Configuration UI initialized");
+    LOG_INFO("Master configuration system initialized successfully");
+    return CONFIG_OK;
+}
+
+/* ========================================================================
+ * MASTER ENTRY SEQUENCE DETECTION
+ * ======================================================================== */
+
+bool config_ui_update_entry_sequence(uint8_t keycode, bool pressed)
+{
+    if (g_master_config.state != MASTER_STATE_IDLE) {
+        return false;  // Only detect entry from normal mode
+    }
+
+    uint32_t current_time = HAL_GetTick();
+    bool sequence_changed = false;
+
+    // Track individual key states
+    if (keycode == KC_ENTER) {
+        g_master_config.space_pressed = pressed;
+        sequence_changed = true;
+        LOG_INFO("Space Key Pressed");
+    }
+
+    if (keycode == KC_LALT) {
+        g_master_config.enter_pressed = pressed;
+        sequence_changed = true;
+        LOG_INFO("Enter Key Pressed");
+    }
+
+    // Fn state is tracked externally via kb_state.fn_pressed
+    g_master_config.fn_pressed = kb_state.fn_pressed;
+
+    // Check if complete sequence is active
+    bool sequence_complete = g_master_config.fn_pressed &&
+                           g_master_config.space_pressed &&
+                           g_master_config.enter_pressed;
+
+    if (sequence_complete && !g_master_config.entry_sequence_active) {
+        // Sequence just started
+        g_master_config.entry_sequence_start_time = current_time;
+        g_master_config.entry_sequence_active = true;
+        g_master_config.state = MASTER_STATE_ENTRY_SEQUENCE;
+        LOG_DEBUG("Configuration entry sequence started");
+
+    } else if (!sequence_complete && g_master_config.entry_sequence_active) {
+        // Sequence broken
+        g_master_config.entry_sequence_active = false;
+        g_master_config.entry_sequence_complete = false;
+        g_master_config.state = MASTER_STATE_IDLE;
+        LOG_DEBUG("Configuration entry sequence cancelled");
+    }
+
+    return sequence_changed;
+}
+
+void check_config_ui_functions(void)
+{
+    if (!g_master_initialized) {
+        return;
+    }
+
+    // Check entry sequence completion
+    if (g_master_config.state == MASTER_STATE_ENTRY_SEQUENCE) {
+        uint32_t current_time = HAL_GetTick();
+        uint32_t hold_duration = current_time - g_master_config.entry_sequence_start_time;
+
+        if (hold_duration >= (CONFIG_ENTRY_HOLD_TIME_MS)) {
+            g_master_config.entry_sequence_complete = true;
+            LOG_INFO("Configuration entry sequence complete - entering config mode");
+            config_ui_enter_master_mode();
+        }
+    }
+}
+
+/* ========================================================================
+ * MASTER MODE ENTRY/EXIT
+ * ======================================================================== */
+
+config_status_t config_ui_enter_master_mode(void)
+{
+    if (g_master_config.state != MASTER_STATE_ENTRY_SEQUENCE) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    LOG_INFO("Entering master configuration mode");
+
+    // Block HID reports
+    g_config_ui_active = true;
+	if(g_effect.config.ble_lmp_behavior == LMP_BEHAVIOR_SYSTEM_OFF
+		&& g_effect.config.usb_lmp_behavior == LMP_BEHAVIOR_SYSTEM_OFF){
+		Backlight_ExitShutdown();
+	}
+    // Stop normal effects
+    Effects_Stop();
+
+
+
+    // Initialize session
+    g_master_config.session_start_time = HAL_GetTick();
+    g_master_config.last_activity_time = HAL_GetTick();
+    g_master_config.session_active = true;
+    g_master_config.has_unsaved_changes = false;
+    g_master_config.sections_modified_mask = 0;
+    g_master_config.timeout_warning_shown = false;
+    g_master_config.error_count = 0;
+
+    // Reset entry sequence
+    g_master_config.entry_sequence_active = false;
+    g_master_config.entry_sequence_complete = false;
+    g_master_config.fn_pressed = false;
+    g_master_config.space_pressed = false;
+    g_master_config.enter_pressed = false;
+
+    kb_state.fn_pressed = false;
+    // Enter main menu
+    g_master_config.state = MASTER_STATE_MAIN_MENU;
+
+    // Show visual confirmation and section indicators
+    config_ui_flash_enter_confirmation();
+    config_ui_show_section_menu();
+
+    LOG_INFO("Master configuration mode active - showing section menu");
+    return CONFIG_OK;
+}
+
+config_status_t config_ui_exit_master_mode(bool save_changes)
+{
+    if (!g_master_config.session_active) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    g_blocking_state.fn_blocking_active = false;
+    g_blocking_state.fn_pressed = false;
+
+    LOG_INFO("Exiting master configuration mode (save=%d)", save_changes);
+
+    config_status_t result = CONFIG_OK;
+
+    // Handle any active sessions that haven't been explicitly saved/cancelled
+    if (g_master_config.zones_session_active) {
+        result = Zones_ExitProgramming(save_changes);
+        g_master_config.zones_session_active = false;
+    }
+
+    // Clean up any other pending changes
+    if (save_changes) {
+        // Save any remaining pending section changes to EEPROM
+        if (g_master_config.effects_changes_pending) {
+            config_ui_save_effects_section();
+        }
+        if (g_master_config.power_changes_pending) {
+            config_ui_save_power_section();
+        }
+        if (g_master_config.brightness_changes_pending) {
+            config_ui_save_brightness_section();
+        }
+    } else {
+        // Clear pending flags without saving
+        g_master_config.effects_changes_pending = false;
+        g_master_config.power_changes_pending = false;
+        g_master_config.brightness_changes_pending = false;
+    }
+
+    // Reset master state and restore normal operation
+    g_master_config.state = MASTER_STATE_IDLE;
+    g_master_config.session_active = false;
+    g_config_ui_active = false;
+    Effects_StartRuntimeEffect();
+
+    if (!g_effect.config.effects_enabled) {
+        Backlight_SetAll(0, 0, 0);
+        Backlight_EnterShutdown();
+    }
+
+    LOG_INFO("Master configuration mode exited");
+    return result;
+}
+
+/* ========================================================================
+ * MAIN MENU AND SECTION NAVIGATION
+ * ======================================================================== */
+
+void config_ui_show_section_menu(void)
+{
+    // Set breathing background
+	Backlight_SetAllRGB(BACKLIGHT_OFF);
+
+    // Show section indicators on number row (1-4)
+    Backlight_SetKeyRGB(SECTION_KEY_ROW, SECTION_ZONES_KEY_COL, CONFIG_SECTION_INDICATOR_COLOR);
+    Backlight_SetKeyRGB(SECTION_KEY_ROW, SECTION_EFFECTS_KEY_COL, CONFIG_SECTION_INDICATOR_COLOR);
+    Backlight_SetKeyRGB(SECTION_KEY_ROW, SECTION_POWER_KEY_COL, CONFIG_SECTION_INDICATOR_COLOR);
+    Backlight_SetKeyRGB(SECTION_KEY_ROW, SECTION_BRIGHTNESS_KEY_COL, CONFIG_SECTION_INDICATOR_COLOR);
+
+    g_master_config.menu_indicators_active = true;
+
+    LOG_DEBUG("Section menu displayed - sections 1-4 highlighted");
+}
+
+config_status_t config_ui_enter_section(uint8_t section_number)
+{
+    if (g_master_config.state != MASTER_STATE_MAIN_MENU) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    config_ui_update_activity();
+
+    LOG_INFO("Entering section %d", section_number);
+
+    config_status_t result = CONFIG_OK;
+
+    switch (section_number) {
+        case 1: // Zone Programming
+            result = config_ui_enter_zones();
+            break;
+
+        case 2: // Effects Configuration
+            result = config_ui_enter_effects();
+            break;
+
+        case 3: // Power Management
+            result = config_ui_enter_power();
+            break;
+
+        case 4: // Brightness Control
+            result = config_ui_enter_brightness();
+            break;
+
+        default:
+            LOG_WARNING("Invalid section number: %d", section_number);
+            return CONFIG_INVALID_PARAMETER;
+    }
+
+    if (result != CONFIG_OK) {
+        LOG_ERROR("Failed to enter section %d: %d", section_number, result);
+        config_ui_handle_error(result);
+    }
+
+    return result;
+}
+
+/* ========================================================================
+ * SECTION IMPLEMENTATIONS
+ * ======================================================================== */
+
+config_status_t config_ui_enter_zones(void)
+{
+    LOG_INFO("Entering zone programming section");
+
+    // Start zones programming subsystem
+    config_status_t result = Zones_EnterProgramming();
+    if (result != CONFIG_OK) {
+        return result;
+    }
+
+    g_master_config.state = MASTER_STATE_ZONE_PROGRAMMING;
+    g_master_config.zones_session_active = true;
+    g_master_config.menu_indicators_active = false;
 
     return CONFIG_OK;
 }
 
+config_status_t config_ui_enter_effects(void)
+{
+    LOG_INFO("Entering effects configuration section");
+    Backlight_SetAllRGB(BACKLIGHT_OFF);
+    Effects_ConfigModeInit();
+
+    g_master_config.effects_state = EFFECTS_STATE_MODE_AND_COLOR;
+    g_master_config.effects_editing_color_index = 0xFF;
+
+    g_master_config.state = MASTER_STATE_EFFECTS_CONFIG;
+    g_master_config.menu_indicators_active = false;
+
+    update_effects_config_display();
+
+    return CONFIG_OK;
+}
+
+config_status_t config_ui_enter_power(void)
+{
+    LOG_INFO("Entering power management section");
+    Backlight_SetAllRGB(BACKLIGHT_OFF);
+    // Use the centralized update function
+    update_power_config_backlight();
+
+    g_master_config.state = MASTER_STATE_POWER_CONFIG;
+    g_master_config.menu_indicators_active = false;
+
+    return CONFIG_OK;
+}
+
+config_status_t config_ui_enter_brightness(void)
+{
+    LOG_INFO("Entering brightness control section"); //TODO
+    Backlight_SetAllRGB(BACKLIGHT_OFF);
+    // Brightness mode options (number row)
+    Backlight_SetKeyRGB(1, 1, CONFIG_SECTION_INDICATOR_COLOR);  // Preset Manual (default)
+    Backlight_SetKeyRGB(1, 2, CONFIG_ACTIVE_SECTION_COLOR);     // Adaptive Battery Based Lighting
+
+    g_master_config.state = MASTER_STATE_BRIGHTNESS_CONFIG;
+    g_master_config.menu_indicators_active = false;
+
+    return CONFIG_OK;
+}
+
+/* ========================================================================
+ * UNIVERSAL COMMAND PROCESSING
+ * ======================================================================== */
+
+bool config_ui_handle_key_event(uint8_t row, uint8_t col, bool pressed)
+{
+    if (!g_config_ui_active) {
+        return false;
+    }
+
+    if(g_master_config.state != MASTER_STATE_MAIN_MENU){
+		config_ui_update_activity();
+		// Check blocking state first
+		if (blocking_state_handle_key(row, col, pressed)) {
+			return true; // Event handled by blocking state
+		}
+
+		// Handle R_Alt key tracking first (both press and release)
+		if (row == 5 && col == 3) { // R_Alt position
+			g_master_config.right_alt_pressed = pressed;
+			return true;
+		}
+
+		// Check R_Alt combinations ONLY on key press
+		if (g_master_config.right_alt_pressed && pressed) {
+			if (handle_effects_right_alt_combinations(row, col)) {
+				return true;
+			}
+		}
+
+    } else if(g_master_config.state == MASTER_STATE_MAIN_MENU){
+
+    	uint8_t current_layer = g_master_config.fn_pressed?FN_LAYER:BASE_LAYER;
+
+    	if(layers[BASE_LAYER][row][col] == KC_FN){
+    		current_layer = FN_LAYER;
+    		g_master_config.fn_pressed = pressed;
+    	}
+
+		// Check for universal commands first (Fn + key combinations)
+		if (current_layer == FN_LAYER) {
+			return config_ui_process_universal_command(row, col);
+		}
+    }
+
+    // Route to appropriate section handler
+    switch (g_master_config.state) {
+        case MASTER_STATE_MAIN_MENU:
+            return config_ui_handle_main_menu_key(row, col);
+
+        case MASTER_STATE_ZONE_PROGRAMMING:
+            return Zones_HandleKey(row, col, pressed);
+
+        case MASTER_STATE_EFFECTS_CONFIG:
+            return config_ui_handle_effects_key(row, col);
+
+        case MASTER_STATE_POWER_CONFIG:
+            return config_ui_handle_power_key(row, col);
+
+        case MASTER_STATE_BRIGHTNESS_CONFIG:
+            return config_ui_handle_brightness_key(row, col);
+
+        default:
+            return false;
+    }
+}
+
+bool config_ui_process_universal_command(uint8_t row, uint8_t col)
+{
+    uint8_t keycode = layers[FN_LAYER][row][col];
+
+    // Fn + Backspace = Exit System Configuration
+    if (keycode == KC_BSPACE) {
+        LOG_INFO("Exit system configuration command received");
+        config_ui_exit_master_mode(true);  // Save any remaining changes
+        return true;
+    }
+
+    return false;
+}
+
+config_status_t config_ui_return_to_menu(void)
+{
+
+	g_blocking_state.fn_blocking_active = false;
+	g_blocking_state.fn_pressed = false;
+
+    // Exit current section without saving section-specific changes
+    switch (g_master_config.state) {
+        case MASTER_STATE_ZONE_PROGRAMMING:
+            if (g_master_config.zones_session_active) {
+                // Note: Individual section changes are discarded, but session continues
+                g_master_config.zones_session_active = false;
+                Zones_ExitProgramming(false);
+            }
+            break;
+
+        case MASTER_STATE_EFFECTS_CONFIG:
+            Effects_ConfigModeExit();
+            break;
+
+        case MASTER_STATE_POWER_CONFIG:
+        case MASTER_STATE_BRIGHTNESS_CONFIG:
+            // No special cleanup needed
+            break;
+
+        default:
+            break;
+    }
+
+    // Return to main menu
+    g_master_config.state = MASTER_STATE_MAIN_MENU;
+    config_ui_show_section_menu();
+
+    return CONFIG_OK;
+}
+
+/* ========================================================================
+ * SECTION-SPECIFIC KEY HANDLERS
+ * ======================================================================== */
+
+bool config_ui_handle_main_menu_key(uint8_t row, uint8_t col)
+{
+    // Only handle number row (1-4) for section selection
+    if (row != SECTION_KEY_ROW || col < 1 || col > 4) {
+        return false;
+    }
+
+    config_ui_enter_section(col);
+    return true;
+}
+
+bool config_ui_handle_effects_key(uint8_t row, uint8_t col)
+{
+
+    // Handle HSV editing mode first
+    if (g_master_config.effects_state == EFFECTS_STATE_HSV_EDIT) {
+        return handle_effects_hsv_keys(row, col);
+    }
+
+    // Handle mode selection (row 1, cols 1-3)
+    if (row == 1 && col >= 1 && col <= 3) {
+        return handle_effects_mode_selection(col);
+    }
+
+    // Handle color selection (row 3, cols 1-12)
+    if (row == EFFECTS_COLOR_KEY_ROW && col >= 1 && col <= 12) {
+        return handle_effects_color_selection(col);
+    }
+
+    return false;
+}
+
+static void update_power_config_backlight(void)
+{
+    // Determine current USB mode column based on actual config
+    uint8_t usb_col = 0; // default fallback
+    switch(g_effect.config.usb_lmp_behavior) {
+       case LMP_BEHAVIOR_OFF: usb_col = 1; break;
+       case LMP_BEHAVIOR_DIM: usb_col = 2; break;
+       case LMP_BEHAVIOR_SYSTEM_OFF: usb_col = 3; break;
+    }
+
+    // Determine current BLE mode column based on actual config
+    uint8_t ble_col = 0; // default fallback
+    switch(g_effect.config.ble_lmp_behavior) {
+       case LMP_BEHAVIOR_OFF: ble_col = 1; break;
+       case LMP_BEHAVIOR_DIM: ble_col = 2; break;
+       case LMP_BEHAVIOR_SYSTEM_OFF: ble_col = 3; break;
+    }
+
+    // USB modes (function row) - only show available options when backlight enabled
+    if (g_effect.config.effects_enabled) {
+        Backlight_SetKeyRGB(0, 1, (usb_col == 1) ?
+        		CONFIG_ACTIVE_SECTION_COLOR : CONFIG_SECTION_INDICATOR_COLOR); // Off
+        Backlight_SetKeyRGB(0, 2, (usb_col == 2) ?
+        		CONFIG_ACTIVE_SECTION_COLOR : CONFIG_SECTION_INDICATOR_COLOR); // Dim
+        Backlight_SetKeyRGB(0, 3, Color_Dim(COLOR_RED)); // System Off (grayed out)
+    } else {
+        // Backlight disabled - only show SYSTEM_OFF as active
+        Backlight_SetKeyRGB(0, 1, Color_Dim(COLOR_RED)); // Off (grayed)
+        Backlight_SetKeyRGB(0, 2, Color_Dim(COLOR_RED)); // Dim (grayed)
+        Backlight_SetKeyRGB(0, 3, CONFIG_ACTIVE_SECTION_COLOR); // System Off (forced active)
+    }
+
+    // BLE modes (number row)
+    if (g_effect.config.effects_enabled) {
+        Backlight_SetKeyRGB(1, 1, (ble_col == 1) ?
+        		CONFIG_ACTIVE_SECTION_COLOR : CONFIG_SECTION_INDICATOR_COLOR);
+        Backlight_SetKeyRGB(1, 2, (ble_col == 2) ?
+        		CONFIG_ACTIVE_SECTION_COLOR : CONFIG_SECTION_INDICATOR_COLOR);
+        Backlight_SetKeyRGB(1, 3, Color_Dim(COLOR_RED));
+    } else {
+        Backlight_SetKeyRGB(1, 1, Color_Dim(COLOR_RED));
+        Backlight_SetKeyRGB(1, 2, Color_Dim(COLOR_RED));
+        Backlight_SetKeyRGB(1, 3, CONFIG_ACTIVE_SECTION_COLOR);
+    }
+
+    // Master backlight control (row 2) - shows ACTUAL persistent setting
+    Backlight_SetKeyRGB(2, 1, g_effect.config.effects_enabled ?
+    		CONFIG_ACTIVE_SECTION_COLOR : CONFIG_SECTION_INDICATOR_COLOR); // Enable
+    Backlight_SetKeyRGB(2, 2, !g_effect.config.effects_enabled ?
+    		CONFIG_ACTIVE_SECTION_COLOR : CONFIG_SECTION_INDICATOR_COLOR); // Disable
+}
+
+bool config_ui_handle_power_key(uint8_t row, uint8_t col)
+{
+   // Master backlight enable/disable (row 2)
+   if (row == 2 && col >= 1 && col <= 2) {
+       bool new_backlight_enabled = (col == 1); // 1=Enable, 2=Disable
+
+       // Update the PERSISTENT setting (not temporary config state)
+       bool current_setting =  g_effect.config.effects_enabled;
+
+       if (new_backlight_enabled != current_setting) {
+           // Update the setting we'll save
+           if (g_master_config.session_active) {
+               g_effect.config.effects_enabled = new_backlight_enabled;
+           }
+
+           if (!new_backlight_enabled) {
+               g_effect.config.usb_lmp_behavior = LMP_BEHAVIOR_SYSTEM_OFF;
+               g_effect.config.ble_lmp_behavior = LMP_BEHAVIOR_SYSTEM_OFF;
+               LOG_INFO("Backlight disabled - LMP behaviors set to SYSTEM_OFF");
+           }else{
+        	   g_effect.config.usb_lmp_behavior = LMP_BEHAVIOR_OFF;
+        	   g_effect.config.ble_lmp_behavior = LMP_BEHAVIOR_OFF;
+        	   LOG_INFO("Backlight re-enabled - LMP behaviors defaulted to OFF");
+        	   // TODO: Later read from EEPROM to restore user's previous LMP settings
+		  }
+
+           g_master_config.power_changes_pending = true;
+           g_master_config.has_unsaved_changes = true;
+           g_master_config.sections_modified_mask |= (1 << 2);
+       }
+
+       // Update visual display
+       update_power_config_backlight();
+
+       LOG_DEBUG("Master backlight %s", new_backlight_enabled ? "ENABLED" : "DISABLED");
+       return true;
+   }
+
+   // USB/BLE mode selection - check if backlight is enabled in PERSISTENT settings
+   bool backlight_enabled = g_effect.config.effects_enabled;
+
+   // USB mode selection (row 0)
+   if (row == 0 && col >= 1 && col <= 2) {
+       if (!backlight_enabled) {
+           LOG_DEBUG("USB mode locked to SYSTEM_OFF (backlight disabled)");
+           return true;
+       }
+
+       lmp_behavior_t new_usb_behavior;
+       switch(col) {
+           case 1: new_usb_behavior = LMP_BEHAVIOR_OFF; break;
+           case 2: new_usb_behavior = LMP_BEHAVIOR_DIM; break;
+           default: return false;
+       }
+
+       if (new_usb_behavior != g_effect.config.usb_lmp_behavior) {
+           g_effect.config.usb_lmp_behavior = new_usb_behavior;
+           g_master_config.power_changes_pending = true;
+           g_master_config.has_unsaved_changes = true;
+           g_master_config.sections_modified_mask |= (1 << 2);
+       }
+
+       // Update visual display
+       update_power_config_backlight();
+
+       LOG_DEBUG("USB power mode %d selected", new_usb_behavior);
+       return true;
+   }
+
+   // BLE mode selection (row 1) - similar logic
+   if (row == 1 && col >= 1 && col <= 2) {
+       if (!backlight_enabled) {
+           LOG_DEBUG("BLE mode locked to SYSTEM_OFF (backlight disabled)");
+           return true;
+       }
+
+       lmp_behavior_t new_ble_behavior;
+       switch(col) {
+           case 1: new_ble_behavior = LMP_BEHAVIOR_OFF; break;
+           case 2: new_ble_behavior = LMP_BEHAVIOR_DIM; break;
+           default: return false;
+       }
+
+       if (new_ble_behavior != g_effect.config.ble_lmp_behavior) {
+           g_effect.config.ble_lmp_behavior = new_ble_behavior;
+           g_master_config.power_changes_pending = true;
+           g_master_config.has_unsaved_changes = true;
+           g_master_config.sections_modified_mask |= (1 << 2);
+       }
+
+       // Update visual display
+       update_power_config_backlight();
+
+       LOG_DEBUG("BLE power mode %d selected", new_ble_behavior);
+       return true;
+   }
+
+   return false;
+}
+
+bool config_ui_handle_brightness_key(uint8_t row, uint8_t col)
+{
+    // Brightness control key handling
+    static uint8_t brightness_mode = 1;  // Default: preset
+
+    if (row == 1 && col >= 1 && col <= 2) {
+        // Brightness mode selection
+        brightness_mode = col;
+
+        // Update mode indicators
+        for (uint8_t i = 1; i <= 2; i++) {
+            Backlight_RGB_t color = (i == brightness_mode) ? CONFIG_ACTIVE_SECTION_COLOR : CONFIG_SECTION_INDICATOR_COLOR;
+            Backlight_SetKeyRGB(1, i, color);
+        }
+
+        g_master_config.brightness_changes_pending = true;
+        g_master_config.has_unsaved_changes = true;
+        g_master_config.sections_modified_mask |= (1 << 3);  // Brightness = bit 3
+
+        LOG_DEBUG("Brightness mode %d selected", brightness_mode);
+        return true;
+    }
+
+    return false;
+}
+
+/* ========================================================================
+ * UNIFIED SESSION MANAGEMENT
+ * ======================================================================== */
+
+static bool config_ui_save_current_section(void)
+{
+    config_ui_flash_save_result(true);
+    g_blocking_state.fn_blocking_active = false;
+
+    switch (g_master_config.state) {
+        case MASTER_STATE_ZONE_PROGRAMMING:
+            config_ui_save_zone_section();
+            break;
+
+        case MASTER_STATE_EFFECTS_CONFIG:
+            config_ui_save_effects_section();
+            break;
+
+        case MASTER_STATE_POWER_CONFIG:
+            config_ui_save_power_section();
+            break;
+
+        case MASTER_STATE_BRIGHTNESS_CONFIG:
+            config_ui_save_brightness_section();
+            break;
+
+        case MASTER_STATE_MAIN_MENU:
+            LOG_INFO("Save command ignored in main menu");
+            return true;
+
+        default:
+            LOG_WARNING("Save command in unknown state: %d", g_master_config.state);
+            return false;
+    }
+    g_blocking_state.fn_pressed = false;
+    return true;
+}
+
+static bool config_ui_cancel_current_section(void)
+{
+    config_ui_flash_save_result(false);
+    g_blocking_state.fn_blocking_active = false;
+
+    switch (g_master_config.state) {
+        case MASTER_STATE_ZONE_PROGRAMMING:
+            config_ui_cancel_zone_section();
+            break;
+
+        case MASTER_STATE_EFFECTS_CONFIG:
+            config_ui_cancel_effects_section();
+            break;
+
+        case MASTER_STATE_POWER_CONFIG:
+            config_ui_cancel_power_section();
+            break;
+
+        case MASTER_STATE_BRIGHTNESS_CONFIG:
+            config_ui_cancel_brightness_section();
+            break;
+
+        case MASTER_STATE_MAIN_MENU:
+            LOG_INFO("Cancel command ignored in main menu");
+            return true;
+
+        default:
+            LOG_WARNING("Cancel command in unknown state: %d", g_master_config.state);
+            return false;
+    }
+
+    return true;
+}
+
+static config_status_t config_ui_save_effects_section(void)
+{
+    config_status_t result = CONFIG_OK;
+
+    if (g_master_config.effects_changes_pending) {
+        // Save effects configuration directly to EEPROM
+        // TODO: Replace with actual EEPROM save function
+        // result = effects_save_config_to_eeprom(&g_effect.config);
+
+        if (result == CONFIG_OK) {
+            LOG_INFO("Effects configuration saved to EEPROM");
+            g_master_config.effects_changes_pending = false;
+        } else {
+            LOG_ERROR("Failed to save effects configuration to EEPROM: %d", result);
+        }
+    }
+
+    // Return to MAIN MENU - EFFECTS SECTION COMPLETE
+    g_master_config.state = MASTER_STATE_MAIN_MENU;
+    config_ui_show_section_menu();
+
+    return result;
+}
+
+static config_status_t config_ui_cancel_effects_section(void)
+{
+    if (g_master_config.effects_changes_pending) {
+        // Restore effects configuration from EEPROM
+        // TODO: Replace with actual EEPROM load function
+        // effects_load_config_from_eeprom(&g_effect.config);
+
+        LOG_INFO("Effects configuration changes discarded - restored from EEPROM");
+        g_master_config.effects_changes_pending = false;
+    }
+
+    // Return to MAIN MENU - EFFECTS SECTION COMPLETE
+    g_master_config.state = MASTER_STATE_MAIN_MENU;
+    config_ui_show_section_menu();
+
+    return CONFIG_OK;
+}
+
+static config_status_t config_ui_save_zone_section(void)
+{
+    config_status_t result = CONFIG_OK;
+
+    // Save if we have an active session
+    if (g_master_config.zones_session_active) {
+        result = Zones_ExitProgramming(true);  // Save to EEPROM
+        if (result == CONFIG_OK) {
+            LOG_INFO("Zone programming saved to EEPROM successfully");
+        } else {
+            LOG_ERROR("Failed to save zone programming to EEPROM: %d", result);
+        }
+        g_master_config.zones_session_active = false;
+    }
+
+    // Handle navigation based on zone state
+    zone_programming_state_t zone_state = Zone_Return_to_Section(g_blocking_state.fn_pressed);
+    if (zone_state == ZONE_PROG_INACTIVE) {
+        // Zone wants to return to main menu
+        g_master_config.state = MASTER_STATE_MAIN_MENU;
+        config_ui_show_section_menu();
+    }
+
+    return result;
+}
+
+static config_status_t config_ui_cancel_zone_section(void)
+{
+    config_status_t result = CONFIG_OK;
+
+    // Cancel if we have an active session
+    if (g_master_config.zones_session_active) {
+        result = Zones_ExitProgramming(false);  // Discard changes
+        LOG_INFO("Zone programming changes discarded");
+        g_master_config.zones_session_active = false;
+    }
+
+    // Handle navigation based on zone state
+    zone_programming_state_t zone_state = Zone_Return_to_Section(g_blocking_state.fn_pressed);
+    if (zone_state == ZONE_PROG_INACTIVE) {
+        // Zone wants to return to main menu
+        g_master_config.state = MASTER_STATE_MAIN_MENU;
+        Backlight_SetAll(0,0,0);
+        config_ui_show_section_menu();
+    }
+
+    return result;
+}
+
+static config_status_t config_ui_save_power_section(void)
+{
+    config_status_t result = CONFIG_OK;
+
+    if (g_master_config.power_changes_pending) {
+        // Save power management settings directly to EEPROM using system_config.h API
+        // TODO: Replace with actual calls like:
+        // result = user_set_power_management(&power_settings);
+        // result |= effects_save_lmp_config(&g_effect.config);
+
+        if (result == CONFIG_OK) {
+            LOG_INFO("Power management configuration saved to EEPROM");
+            g_master_config.power_changes_pending = false;
+        } else {
+            LOG_ERROR("Failed to save power management to EEPROM: %d", result);
+        }
+    }
+
+    // Return to MAIN MENU - POWER SECTION COMPLETE
+    g_master_config.state = MASTER_STATE_MAIN_MENU;
+    config_ui_show_section_menu();
+
+    return result;
+}
+
+static config_status_t config_ui_cancel_power_section(void)
+{
+    if (g_master_config.power_changes_pending) {
+        // Restore power management settings from EEPROM
+        // TODO: Replace with actual calls like:
+        // user_get_power_management(&power_settings);
+        // effects_load_lmp_config(&g_effect.config);
+
+        LOG_INFO("Power management changes discarded - restored from EEPROM");
+        g_master_config.power_changes_pending = false;
+    }
+
+    // Return to MAIN MENU - POWER SECTION COMPLETE
+    g_master_config.state = MASTER_STATE_MAIN_MENU;
+    config_ui_show_section_menu();
+
+    return CONFIG_OK;
+}
+
+static config_status_t config_ui_save_brightness_section(void)
+{
+    config_status_t result = CONFIG_OK;
+
+    if (g_master_config.brightness_changes_pending) {
+        // Save brightness settings directly to EEPROM
+        // TODO: Replace with actual EEPROM save functions
+        // result = user_save_brightness_presets_to_eeprom(&brightness_config);
+
+        if (result == CONFIG_OK) {
+            LOG_INFO("Brightness configuration saved to EEPROM");
+            g_master_config.brightness_changes_pending = false;
+        } else {
+            LOG_ERROR("Failed to save brightness configuration to EEPROM: %d", result);
+        }
+    }
+
+    // Return to MAIN MENU - BRIGHTNESS SECTION COMPLETE
+    g_master_config.state = MASTER_STATE_MAIN_MENU;
+    config_ui_show_section_menu();
+
+    return result;
+}
+
+static config_status_t config_ui_cancel_brightness_section(void)
+{
+    if (g_master_config.brightness_changes_pending) {
+        // Restore brightness settings from EEPROM
+        // TODO: Replace with actual EEPROM load functions
+        // user_load_brightness_presets_from_eeprom(&brightness_config);
+
+        LOG_INFO("Brightness configuration changes discarded - restored from EEPROM");
+        g_master_config.brightness_changes_pending = false;
+    }
+
+    // Return to MAIN MENU - BRIGHTNESS SECTION COMPLETE
+    g_master_config.state = MASTER_STATE_MAIN_MENU;
+    config_ui_show_section_menu();
+
+    return CONFIG_OK;
+}
+
+
+
+/* ========================================================================
+ * TIMEOUT AND ERROR HANDLING
+ * ======================================================================== */
+
 void config_ui_process(void)
 {
-    if (!g_initialized || g_config_ctx.current_state == CONFIG_UI_IDLE) {
+    if (!g_master_initialized || !g_master_config.session_active) {
         return;
     }
 
-    // Check timeout
-    if (check_timeout_conditions()) {
-        LOG_INFO("Configuration timeout - auto-exiting");
+    // Check blocking state timer
+	blocking_state_process();
+
+    // Check session timeout
+    uint32_t current_time = HAL_GetTick();
+    uint32_t elapsed = current_time - g_master_config.last_activity_time;
+    PM_RecordActivity();
+
+    // Show warning at 9 minutes
+    if (elapsed >= CONFIG_TIMEOUT_WARNING_MS && !g_master_config.timeout_warning_shown) {
+        config_ui_flash_timeout_warning();
+        g_master_config.timeout_warning_shown = true;
+        LOG_WARNING("Configuration timeout warning - 1 minute remaining");
+    }
+
+    // Auto-exit at 10 minutes
+    if (elapsed >= CONFIG_SESSION_TIMEOUT_MS) {
+        LOG_WARNING("Configuration session timeout - auto-exiting without saving");
         config_ui_handle_timeout();
         return;
     }
 
-    // Process pending commands
-    if (g_config_ctx.pending_command != UNIVERSAL_CMD_NONE) {
-        config_status_t result = process_universal_command(g_config_ctx.pending_command);
-        g_config_ctx.pending_command = UNIVERSAL_CMD_NONE;
+    if (g_master_config.state == MASTER_STATE_EFFECTS_CONFIG &&
+        g_master_config.effects_state == EFFECTS_STATE_HSV_EDIT) {
 
-        if (result != CONFIG_OK) {
-            handle_error(result);
+        uint32_t current_time = HAL_GetTick();
+        uint32_t hsv_elapsed = current_time - g_master_config.effects_hsv_start_time;
+
+        if (hsv_elapsed >= EFFECTS_HSV_WARNING_MS && hsv_elapsed < (EFFECTS_HSV_WARNING_MS + 1000)) {
+            config_ui_flash_timeout_warning();
+        }
+
+        if (hsv_elapsed >= EFFECTS_HSV_TIMEOUT_MS) {
+            LOG_WARNING("Effects HSV mode timeout - discarding changes");
+            effects_exit_hsv_mode(false);
         }
     }
 
     // Update visual feedback
     config_ui_update_visual_feedback();
+
+    // Process zone programming if active
+    if (g_master_config.state == MASTER_STATE_ZONE_PROGRAMMING) {
+        Zones_Process();
+    }
 }
 
-void check_config_ui_functions(void)
+void config_ui_handle_timeout(void)
 {
-    if (g_config_ctx.current_state != CONFIG_UI_IDLE) {
+    config_ui_flash_timeout_warning();
+    config_ui_exit_master_mode(false);  // Exit without saving
+}
+
+config_status_t config_ui_handle_error(config_status_t error)
+{
+    g_master_config.error_count++;
+    g_master_config.last_error = error;
+
+    LOG_ERROR("Configuration error %d (count: %d)", error, g_master_config.error_count);
+
+    // Flash error indication
+    Backlight_SetAllRGB(CONFIG_CANCEL_COLOR);
+    HAL_Delay(200);
+
+    // Return to appropriate state
+    if (g_master_config.state != MASTER_STATE_MAIN_MENU) {
+        config_ui_return_to_menu();
+    } else {
+        config_ui_show_section_menu();
+    }
+
+    // Force exit if too many errors
+    if (g_master_config.error_count >= CONFIG_MAX_SESSION_ERRORS) {
+        LOG_ERROR("Too many configuration errors - force exiting");
+        config_ui_exit_master_mode(false);
+    }
+
+    return error;
+}
+
+/* ========================================================================
+ * VISUAL FEEDBACK SYSTEM
+ * ======================================================================== */
+
+void config_ui_update_visual_feedback(void)
+{
+    uint32_t current_time = HAL_GetTick();
+
+    if ((current_time - g_master_config.last_visual_update) < CONFIG_VISUAL_UPDATE_INTERVAL_MS) {
         return;
     }
+    g_master_config.last_visual_update = current_time;
+    blocking_state_update_visual();
+}
 
-    if (g_config_ctx.entry_sequence.sequence_complete && is_entry_sequence_complete()) {
-        LOG_INFO("Configuration entry sequence complete");
-        config_status_t result = config_ui_enter_system_mode();
-        if (result != CONFIG_OK) {
-            LOG_ERROR("Failed to enter config mode: %d", result);
-            reset_entry_sequence();
-        }
+void config_ui_flash_enter_confirmation(void)
+{
+    // Quick cyan flash to confirm entry
+    Backlight_SetAllRGB(CONFIG_ACTIVE_SECTION_COLOR);
+    HAL_Delay(200);
+}
+
+void config_ui_flash_save_result(bool success)
+{
+    Backlight_RGB_t flash_color = success ? CONFIG_SAVE_SUCCESS_COLOR : CONFIG_CANCEL_COLOR;
+    uint8_t flash_count = success ? 1 : 2;
+
+    for (uint8_t i = 0; i < flash_count; i++) {
+        Backlight_SetAllRGB(flash_color);
+        HAL_Delay(100);
+        Backlight_SetAll(0, 0, 0);
+        if (i < flash_count - 1) HAL_Delay(100);
     }
 }
 
-bool config_ui_handle_key_event(uint8_t row, uint8_t col, bool pressed)
+void config_ui_flash_timeout_warning(void)
 {
-    if (!g_config_ui_active || !pressed) {
-        return false;
+    // Yellow flash for timeout warning
+    for (uint8_t i = 0; i < 2; i++) {
+        Backlight_SetAllRGB(CONFIG_WARNING_COLOR);
+        HAL_Delay(200);
+        Backlight_SetAll(0, 0, 0);
+        HAL_Delay(200);
     }
+}
 
-    update_activity_time();
+/* ========================================================================
+ * UTILITY AND STATUS FUNCTIONS
+ * ======================================================================== */
 
-    // Check universal commands first
-    extern kb_state_t kb_state;
-    bool fn_pressed = kb_state.fn_pressed;
-
-    if (is_universal_command(row, col, fn_pressed)) {
-        g_config_ctx.pending_command = detect_universal_command(row, col, fn_pressed);
-        return true;
-    }
-
-    // Route to state handlers
-    config_status_t result = CONFIG_OK;
-    switch (g_config_ctx.current_state) {
-        case CONFIG_UI_MENU:
-            result = process_menu_state(row, col, pressed);
-            break;
-        case CONFIG_UI_ZONE_CONFIG:
-            result = process_zone_config_fsm(row, col, pressed);
-            break;
-        case CONFIG_UI_EFFECTS_CONFIG:
-            result = process_effects_config_fsm(row, col, pressed);
-            break;
-        case CONFIG_UI_POWER_CONFIG:
-            result = process_power_config_fsm(row, col, pressed);
-            break;
-        case CONFIG_UI_BRIGHTNESS_CONFIG:
-            result = process_brightness_config_fsm(row, col, pressed);
-            break;
-        default:
-            result = CONFIG_ERROR;
-            break;
-    }
-
-    if (result != CONFIG_OK) {
-        handle_error(result);
-    }
-
-    return true;
+void config_ui_update_activity(void)
+{
+    g_master_config.last_activity_time = HAL_GetTick();
+    g_master_config.timeout_warning_shown = false;  // Reset warning
 }
 
 bool config_ui_is_active(void)
@@ -213,1054 +1408,404 @@ bool config_ui_is_active(void)
 
 config_ui_state_t config_ui_get_state(void)
 {
-    return g_initialized ? g_config_ctx.current_state : CONFIG_UI_IDLE;
-}
-
-config_status_t config_ui_enter_system_mode(void)
-{
-    if (!g_initialized || g_config_ui_active) {
-        return CONFIG_INVALID_PARAMETER;
+    // Convert master state to legacy state enum for compatibility
+    switch (g_master_config.state) {
+        case MASTER_STATE_IDLE:
+            return CONFIG_UI_IDLE;
+        case MASTER_STATE_MAIN_MENU:
+            return CONFIG_UI_MENU;
+        case MASTER_STATE_ZONE_PROGRAMMING:
+            return CONFIG_UI_ZONE_CONFIG;
+        case MASTER_STATE_EFFECTS_CONFIG:
+            return CONFIG_UI_EFFECTS_CONFIG;
+        case MASTER_STATE_POWER_CONFIG:
+            return CONFIG_UI_POWER_CONFIG;
+        case MASTER_STATE_BRIGHTNESS_CONFIG:
+            return CONFIG_UI_BRIGHTNESS_CONFIG;
+        default:
+            return CONFIG_UI_IDLE;
     }
-
-    LOG_INFO("Entering configuration mode");
-
-    g_config_ui_active = true;
-
-    config_status_t result = setup_config_mode_environment();
-    if (result != CONFIG_OK) {
-        g_config_ui_active = false;
-        return result;
-    }
-
-    // Initialize session
-    g_config_ctx.session.session_start_time = HAL_GetTick();
-    g_config_ctx.session.last_activity_time = g_config_ctx.session.session_start_time;
-    g_config_ctx.session.session_active = true;
-    g_config_ctx.session.changes_pending = false;
-    g_config_ctx.session.error_count = 0;
-
-    result = enter_state(CONFIG_UI_MENU);
-    if (result != CONFIG_OK) {
-        restore_normal_environment();
-        g_config_ui_active = false;
-        return result;
-    }
-
-    flash_confirmation(CONFIG_ACTIVE_COLOR, 200);
-    LOG_INFO("Configuration mode entered");
-
-    return CONFIG_OK;
-}
-
-config_status_t config_ui_exit_system_mode(bool save_changes)
-{
-    if (!g_config_ui_active) {
-        return CONFIG_INVALID_PARAMETER;
-    }
-
-    LOG_INFO("Exiting configuration mode (save=%d)", save_changes);
-
-    if (save_changes && g_config_ctx.session.changes_pending) {
-        // TODO: Implement actual save logic
-        flash_confirmation(CONFIG_SAVE_COLOR, CONFIG_FLASH_DURATION_MS);
-        LOG_INFO("Configuration saved");
-    } else if (g_config_ctx.session.changes_pending) {
-        flash_confirmation(CONFIG_CANCEL_COLOR, CONFIG_FLASH_DURATION_MS);
-        LOG_INFO("Changes discarded");
-    }
-
-    exit_current_state();
-    restore_normal_environment();
-
-    g_config_ui_active = false;
-    g_config_ctx.current_state = CONFIG_UI_IDLE;
-    g_config_ctx.session.session_active = false;
-    g_config_ctx.session.changes_pending = false;
-
-    reset_entry_sequence();
-
-    return CONFIG_OK;
-}
-
-void config_ui_force_exit(void)
-{
-    LOG_WARNING("Force exiting configuration mode");
-    g_config_ui_active = false;
-    g_config_ctx.current_state = CONFIG_UI_IDLE;
-    Effects_StartRuntimeEffect();
-}
-
-/* ========================================================================
- * SECTION ENTRY FUNCTIONS
- * ======================================================================== */
-
-config_status_t config_ui_enter_zone_config(void)
-{
-    LOG_INFO("Entering zone configuration");
-
-    // Initialize zone FSM
-    g_config_ctx.zone_fsm.state = SECTION_FSM_ENTRY;
-    g_config_ctx.zone_fsm.selected_slot = 0;
-    g_config_ctx.zone_fsm.selection_count = 0;
-
-    // Set default HSV
-    g_config_ctx.zone_fsm.hsv_current.hue = 30;
-    g_config_ctx.zone_fsm.hsv_current.saturation = 100;
-    g_config_ctx.zone_fsm.hsv_current.value = 80;
-
-    // Read zone flags
-    for (uint8_t i = 0; i < 8; i++) {
-        g_config_ctx.zone_fsm.slot_occupied[i] = Zones_IsSlotOccupied(i);
-        g_config_ctx.zone_fsm.slot_key_counts[i] = Zones_GetKeyCount(i);
-    }
-
-    return enter_state(CONFIG_UI_ZONE_CONFIG);
-}
-
-config_status_t config_ui_enter_effects_config(void)
-{
-    LOG_INFO("Entering effects configuration");
-
-    // Initialize effects FSM
-    g_config_ctx.effects_fsm.state = SECTION_FSM_ENTRY;
-    g_config_ctx.effects_fsm.effect_type = 2; // breathing
-    g_config_ctx.effects_fsm.cycle_time_ms = 3000;
-    g_config_ctx.effects_fsm.brightness_min = 10;
-    g_config_ctx.effects_fsm.brightness_max = 80;
-    g_config_ctx.effects_fsm.transition_duration_ms = 1000;
-
-    // Initialize color presets (6 colors for transitions)
-    g_config_ctx.effects_fsm.color_presets[0] = 0;   // Red
-    g_config_ctx.effects_fsm.color_presets[1] = 60;  // Yellow
-    g_config_ctx.effects_fsm.color_presets[2] = 120; // Green
-    g_config_ctx.effects_fsm.color_presets[3] = 180; // Cyan
-    g_config_ctx.effects_fsm.color_presets[4] = 240; // Blue
-    g_config_ctx.effects_fsm.color_presets[5] = 300; // Magenta
-
-    g_config_ctx.effects_fsm.preview_active = false;
-
-    return enter_state(CONFIG_UI_EFFECTS_CONFIG);
-}
-
-config_status_t config_ui_enter_power_config(void)
-{
-    LOG_INFO("Entering power management");
-
-    // Initialize power FSM - unified modes
-    g_config_ctx.power_fsm.state = SECTION_FSM_ENTRY;
-    g_config_ctx.power_fsm.usb_mode = 2;         // dim
-    g_config_ctx.power_fsm.battery_mode = 2;     // 2min (same as usb_mode values)
-    g_config_ctx.power_fsm.usb_timeout_s = 300;  // 5 minutes
-    g_config_ctx.power_fsm.battery_timeout_s = 120; // 2 minutes
-    g_config_ctx.power_fsm.dim_percentage = 20;
-    g_config_ctx.power_fsm.wake_on_keypress = true;
-    g_config_ctx.power_fsm.preview_active = false;
-
-    return enter_state(CONFIG_UI_POWER_CONFIG);
-}
-
-config_status_t config_ui_enter_brightness_config(void)
-{
-    LOG_INFO("Entering brightness control");
-
-    // Initialize brightness FSM - simplified
-    g_config_ctx.brightness_fsm.state = SECTION_FSM_ENTRY;
-    g_config_ctx.brightness_fsm.global_max = Backlight_GetCurrentMaxBrightness();
-    g_config_ctx.brightness_fsm.global_min = 10;
-    g_config_ctx.brightness_fsm.startup_mode = 2; // preset
-
-    return enter_state(CONFIG_UI_BRIGHTNESS_CONFIG);
-}
-
-/* ========================================================================
- * UNIVERSAL COMMANDS
- * ======================================================================== */
-
-config_status_t config_ui_execute_save(void)
-{
-    LOG_INFO("Executing save command");
-
-    // TODO: Implement section-specific save logic
-    config_status_t result = CONFIG_OK;
-
-    if (result == CONFIG_OK) {
-        g_config_ctx.session.changes_pending = false;
-        flash_confirmation(CONFIG_SAVE_COLOR, CONFIG_FLASH_DURATION_MS);
-        return config_ui_exit_system_mode(true);
-    } else {
-        flash_confirmation(CONFIG_CANCEL_COLOR, CONFIG_FLASH_DURATION_MS);
-        return result;
-    }
-}
-
-config_status_t config_ui_execute_cancel(void)
-{
-    LOG_INFO("Executing cancel command");
-
-    g_config_ctx.session.changes_pending = false;
-    flash_confirmation(CONFIG_CANCEL_COLOR, CONFIG_FLASH_DURATION_MS);
-
-    return config_ui_exit_system_mode(false);
-}
-
-config_status_t config_ui_execute_menu(void)
-{
-    LOG_DEBUG("Returning to main menu");
-    return enter_state(CONFIG_UI_MENU);
-}
-
-void config_ui_handle_timeout(void)
-{
-    LOG_WARNING("Configuration timeout - auto-exiting");
-    flash_confirmation(CONFIG_WARNING_COLOR, CONFIG_FLASH_DURATION_MS);
-    config_ui_exit_system_mode(false);
-}
-
-/* ========================================================================
- * VISUAL FEEDBACK
- * ======================================================================== */
-
-void config_ui_update_visual_feedback(void)
-{
-    uint32_t current_time = HAL_GetTick();
-
-    if ((current_time - g_config_ctx.visual.last_visual_update) < CONFIG_VISUAL_UPDATE_MS) {
-        return;
-    }
-    g_config_ctx.visual.last_visual_update = current_time;
-
-    if (g_config_ctx.visual.config_mode_breathing) {
-        update_breathing_effect();
-    }
-
-    if (g_config_ctx.visual.section_indicators_active) {
-        show_section_indicators();
-    }
-}
-
-void config_ui_show_menu_indicators(void)
-{
-    // Dim all keys
-    Backlight_RGB_t dim_color = CONFIG_DIM_COLOR;
-    Backlight_SetAllRGB(dim_color);
-
-    // Highlight section keys 1-4
-    for (uint8_t col = 1; col <= 4; col++) {
-        const rgb_led_mapping_t* led = get_led_for_key(CONFIG_SECTION_ROW, col);
-        if (led) {
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, col, CONFIG_SECTION_COLOR);
-        }
-    }
-
-    g_config_ctx.visual.section_indicators_active = true;
-}
-
-/* ========================================================================
- * DIAGNOSTICS
- * ======================================================================== */
-
-const config_ui_context_t* config_ui_get_context(void)
-{
-    return &g_config_ctx;
-}
-
-uint32_t config_ui_get_session_duration(void)
-{
-    if (!g_config_ctx.session.session_active) return 0;
-    return HAL_GetTick() - g_config_ctx.session.session_start_time;
-}
-
-uint32_t config_ui_get_timeout_remaining(void)
-{
-    if (!g_config_ctx.session.session_active) return 0;
-
-    uint32_t elapsed = HAL_GetTick() - g_config_ctx.session.last_activity_time;
-    if (elapsed >= CONFIG_AUTO_TIMEOUT_MS) return 0;
-
-    return CONFIG_AUTO_TIMEOUT_MS - elapsed;
 }
 
 bool config_ui_has_pending_changes(void)
 {
-    return g_config_ctx.session.changes_pending;
+    return g_master_config.has_unsaved_changes;
+}
+
+uint32_t config_ui_get_session_duration(void)
+{
+    if (!g_master_config.session_active) return 0;
+    return HAL_GetTick() - g_master_config.session_start_time;
+}
+
+uint32_t config_ui_get_timeout_remaining(void)
+{
+    if (!g_master_config.session_active) return 0;
+
+    uint32_t elapsed = HAL_GetTick() - g_master_config.last_activity_time;
+    if (elapsed >= CONFIG_SESSION_TIMEOUT_MS) return 0;
+
+    return CONFIG_SESSION_TIMEOUT_MS - elapsed;
 }
 
 /* ========================================================================
- * ENTRY SEQUENCE INTEGRATION
+ * LEGACY COMPATIBILITY FUNCTIONS
  * ======================================================================== */
 
-bool config_ui_update_entry_sequence(uint8_t keycode, bool pressed)
+// These functions provide compatibility with existing code
+
+config_status_t config_ui_enter_system_mode(void)
 {
-    if (g_config_ctx.current_state != CONFIG_UI_IDLE) {
-        return false;
-    }
-
-    uint32_t current_time = getMicroseconds();
-    config_entry_sequence_t *seq = &g_config_ctx.entry_sequence;
-
-    // Track Fn key state (handled externally)
-    extern kb_state_t kb_state;
-    seq->fn_pressed = kb_state.fn_pressed;
-
-    // Handle sequence keys
-    bool handled = update_entry_sequence(keycode, pressed);
-
-    // Check for sequence completion
-    if (seq->fn_pressed && seq->space_pressed && seq->enter_pressed) {
-        if (seq->sequence_start_time == 0) {
-            seq->sequence_start_time = current_time;
-        }
-
-        uint32_t hold_duration = current_time - seq->sequence_start_time;
-        if (hold_duration >= (CONFIG_ENTRY_HOLD_TIME_MS * 1000)) {
-            seq->sequence_complete = true;
-            LOG_INFO("Config entry sequence complete");
-        }
-    } else if (seq->sequence_start_time != 0) {
-        reset_entry_sequence();
-    }
-
-    return handled;
+    // Legacy function - redirect to master mode entry
+    return config_ui_enter_master_mode();
 }
 
-/* ========================================================================
- * PRIVATE IMPLEMENTATIONS
- * ======================================================================== */
-
-static config_status_t setup_config_mode_environment(void)
+config_status_t config_ui_exit_system_mode(bool save_changes)
 {
-    LOG_DEBUG("Setting up config mode environment");
-
-    // Setup visual environment
-    setup_config_mode_lighting();
-
-    return CONFIG_OK;
+    // Legacy function - redirect to master mode exit
+    return config_ui_exit_master_mode(save_changes);
 }
 
-static config_status_t restore_normal_environment(void)
+void config_ui_force_exit(void)
 {
-    LOG_DEBUG("Restoring normal environment");
-
-    // Restore normal effects
+    LOG_WARNING("Force exiting configuration system");
+    g_config_ui_active = false;
+    g_master_config.state = MASTER_STATE_IDLE;
+    g_master_config.session_active = false;
     Effects_StartRuntimeEffect();
-
-    // Reset visual state
-    g_config_ctx.visual.config_mode_breathing = false;
-    g_config_ctx.visual.section_indicators_active = false;
-
-    return CONFIG_OK;
 }
 
-static void update_activity_time(void)
+const config_ui_context_t* config_ui_get_context(void)
 {
-    g_config_ctx.session.last_activity_time = HAL_GetTick();
+    return NULL;
 }
 
-static bool check_timeout_conditions(void)
+/* ========================================================================
+ * EFFECTS COLOR SELECTION
+ * ======================================================================== */
+/**
+ * @brief Convert column to color index for effects
+ */
+static uint8_t effects_col_to_color_index(uint8_t col)
 {
-    if (!g_config_ctx.session.auto_timeout_enabled || !g_config_ctx.session.session_active) {
-        return false;
+    return (col >= 1 && col <= 12) ? (col - 1) : 0xFF;
+}
+
+/**
+ * @brief Check if a color is editable in current mode
+ */
+static bool effects_is_color_editable(uint8_t color_index)
+{
+    if (g_effect.config.runtime_mode == EFFECT_MODE_TRANSITION_BREATHING) {
+        return (color_index < transition_color_count);
+    } else {
+        return (color_index == 11);
     }
+}
 
-    uint32_t elapsed = HAL_GetTick() - g_config_ctx.session.last_activity_time;
+/**
+ * @brief Check if a color index is valid for current mode
+ */
+static bool effects_is_color_valid(uint8_t color_index)
+{
+    if (g_effect.config.runtime_mode == EFFECT_MODE_TRANSITION_BREATHING) {
+        return (color_index < transition_color_count);
+    } else {
+        return (color_index < breathing_color_count);
+    }
+}
 
-    // Warning at 9 minutes
-    if (elapsed >= CONFIG_TIMEOUT_WARNING_MS && elapsed < CONFIG_AUTO_TIMEOUT_MS) {
-        static bool warning_shown = false;
-        if (!warning_shown) {
-            config_ui_flash_timeout_warning();
-            LOG_WARNING("Timeout warning - 1 minute remaining");
-            warning_shown = true;
+/**
+ * @brief Update the complete effects configuration display
+ */
+static void update_effects_config_display(void)
+{
+    show_effects_mode_indicators();
+    show_effects_color_indicators();
+}
+
+/**
+ * @brief Show effect mode indicators (Static/Breathing/Transition)
+ */
+static void show_effects_mode_indicators(void)
+{
+    for (uint8_t col = 1; col <= 3; col++) {
+        effect_mode_t mode;
+        switch(col) {
+            case 1: mode = EFFECT_MODE_STATIC; break;
+            case 2: mode = EFFECT_MODE_BREATHING; break;
+            case 3: mode = EFFECT_MODE_TRANSITION_BREATHING; break;
+            default: continue;
         }
-    }
 
-    return (elapsed >= CONFIG_AUTO_TIMEOUT_MS);
-}
-
-static void reset_entry_sequence(void)
-{
-    memset(&g_config_ctx.entry_sequence, 0, sizeof(g_config_ctx.entry_sequence));
-}
-
-static bool update_entry_sequence(uint8_t keycode, bool pressed)
-{
-    config_entry_sequence_t *seq = &g_config_ctx.entry_sequence;
-
-    if (keycode == KC_SPACE) {
-        seq->space_pressed = pressed;
-        return true;
-    }
-
-    if (keycode == KC_ENTER) {
-        seq->enter_pressed = pressed;
-        return true;
-    }
-
-    return false;
-}
-
-static bool is_entry_sequence_complete(void)
-{
-    config_entry_sequence_t *seq = &g_config_ctx.entry_sequence;
-    return (seq->sequence_complete && !seq->fn_pressed && !seq->space_pressed && !seq->enter_pressed);
-}
-
-static bool is_universal_command(uint8_t row, uint8_t col, bool fn_pressed)
-{
-    if (!fn_pressed) return false;
-
-    // Fn + S (Save)
-    if (row == 3 && col == 2) return true;
-    // Fn + L (Cancel)
-    if (row == 3 && col == 9) return true;
-    // Fn + Esc (Menu)
-    if (row == 0 && col == 0) return true;
-
-    return false;
-}
-
-static universal_command_t detect_universal_command(uint8_t row, uint8_t col, bool fn_pressed)
-{
-    if (!fn_pressed) return UNIVERSAL_CMD_NONE;
-
-    if (row == 3 && col == 2) return UNIVERSAL_CMD_SAVE;
-    if (row == 3 && col == 9) return UNIVERSAL_CMD_CANCEL;
-    if (row == 0 && col == 0) return UNIVERSAL_CMD_MENU;
-
-    return UNIVERSAL_CMD_NONE;
-}
-
-static config_status_t process_universal_command(universal_command_t cmd)
-{
-    switch (cmd) {
-        case UNIVERSAL_CMD_SAVE:
-            return config_ui_execute_save();
-        case UNIVERSAL_CMD_CANCEL:
-            return config_ui_execute_cancel();
-        case UNIVERSAL_CMD_MENU:
-            return config_ui_execute_menu();
-        case UNIVERSAL_CMD_TIMEOUT:
-            config_ui_handle_timeout();
-            return CONFIG_OK;
-        default:
-            return CONFIG_INVALID_PARAMETER;
+        Backlight_RGB_t color = (mode == g_effect.config.runtime_mode) ?
+            CONFIG_ACTIVE_SECTION_COLOR : CONFIG_SECTION_INDICATOR_COLOR;
+        Backlight_SetKeyRGB(1, col, color);
     }
 }
 
-static bool is_section_key(uint8_t row, uint8_t col)
+/**
+ * @brief Show color selection indicators based on current mode
+ */
+static void show_effects_color_indicators(void)
 {
-    return (row == CONFIG_SECTION_ROW && col >= 1 && col <= 4);
-}
-
-static uint8_t get_section_from_key(uint8_t row, uint8_t col)
-{
-    if (row != CONFIG_SECTION_ROW || col < 1 || col > 4) return 0;
-    return col;
-}
-
-static config_status_t enter_state(config_ui_state_t new_state)
-{
-    config_ui_state_t old_state = g_config_ctx.current_state;
-
-    if (old_state != CONFIG_UI_IDLE) {
-        exit_current_state();
+    // Clear all color keys first
+    for (uint8_t col = 1; col <= 12; col++) {
+        Backlight_SetKeyRGB(EFFECTS_COLOR_KEY_ROW, col, BACKLIGHT_OFF);
     }
 
-    g_config_ctx.previous_state = old_state;
-    g_config_ctx.current_state = new_state;
-
-    LOG_DEBUG("Config state: %d -> %d", old_state, new_state);
-
-    // State entry actions
-    switch (new_state) {
-        case CONFIG_UI_MENU:
-            config_ui_show_menu_indicators();
-            g_config_ctx.visual.config_mode_breathing = true;
-            break;
-        case CONFIG_UI_ZONE_CONFIG:
-        case CONFIG_UI_EFFECTS_CONFIG:
-        case CONFIG_UI_POWER_CONFIG:
-        case CONFIG_UI_BRIGHTNESS_CONFIG:
-            g_config_ctx.visual.section_indicators_active = false;
-            break;
-        default:
-            break;
-    }
-
-    update_activity_time();
-    return CONFIG_OK;
-}
-
-static config_status_t exit_current_state(void)
-{
-    switch (g_config_ctx.current_state) {
-        case CONFIG_UI_MENU:
-            g_config_ctx.visual.section_indicators_active = false;
-            break;
-        default:
-            break;
-    }
-    return CONFIG_OK;
-}
-
-static config_status_t process_menu_state(uint8_t row, uint8_t col, bool pressed)
-{
-    if (!is_section_key(row, col)) {
-        return CONFIG_OK;
-    }
-
-    uint8_t section = get_section_from_key(row, col);
-    LOG_INFO("Section %d selected", section);
-
-    switch (section) {
-        case 1: return config_ui_enter_zone_config();
-        case 2: return config_ui_enter_effects_config();
-        case 3: return config_ui_enter_power_config();
-        case 4: return config_ui_enter_brightness_config();
-        default: return CONFIG_INVALID_PARAMETER;
-    }
-}
-
-static config_status_t process_zone_config_fsm(uint8_t row, uint8_t col, bool pressed)
-{
-    // Zone configuration FSM implementation
-    zone_config_fsm_t *fsm = &g_config_ctx.zone_fsm;
-
-    switch (fsm->state) {
-        case SECTION_FSM_ENTRY:
-            // Show zone slots 1-8 (red=empty, green=occupied)
-            for (uint8_t i = 1; i <= 8; i++) {
-                Backlight_RGB_t slot_color = fsm->slot_occupied[i-1] ? CONFIG_SECTION_COLOR : CONFIG_CANCEL_COLOR;
-                Backlight_SetKeyRGB(CONFIG_SECTION_ROW, i, slot_color);
-            }
-            fsm->state = SECTION_FSM_BROWSE;
-            break;
-
-        case SECTION_FSM_BROWSE:
-            // Handle slot selection (keys 1-8)
-            if (row == CONFIG_SECTION_ROW && col >= 1 && col <= 8) {
-                fsm->selected_slot = col - 1;
-                LOG_INFO("Zone slot %d selected", fsm->selected_slot);
-
-                // Load zone if occupied, or start with blank
-                if (fsm->slot_occupied[fsm->selected_slot]) {
-                    // TODO: Load zone from EEPROM
-                    LOG_INFO("Loading existing zone");
-                } else {
-                    LOG_INFO("Creating new zone");
-                }
-
-                // Enter edit mode
-                fsm->state = SECTION_FSM_EDIT;
-
-                // Clear display and start key selection
-                Backlight_SetAllRGB(CONFIG_DIM_COLOR);
-                fsm->selection_count = 0;
-                memset(fsm->selected_keys, 0, sizeof(fsm->selected_keys));
-            }
-            break;
-
-        case SECTION_FSM_EDIT:
-            // Handle key selection and HSV adjustment
-            extern kb_state_t kb_state;
-
-            if (kb_state.fn_pressed) {
-                // HSV adjustment with Fn + Arrow keys
-                switch (col) {
-                    case 11: // Left arrow - decrease hue
-                        if (row == 4) {
-                            fsm->hsv_current.hue = (fsm->hsv_current.hue + 350) % 360;
-                            LOG_DEBUG("Hue: %d", fsm->hsv_current.hue);
-                        }
-                        break;
-                    case 13: // Right arrow - increase hue
-                        if (row == 4) {
-                            fsm->hsv_current.hue = (fsm->hsv_current.hue + 10) % 360;
-                            LOG_DEBUG("Hue: %d", fsm->hsv_current.hue);
-                        }
-                        break;
-                    case 12: // Up arrow - increase brightness
-                        if (row == 3) {
-                            fsm->hsv_current.value = (fsm->hsv_current.value < 95) ?
-                                                    fsm->hsv_current.value + 5 : 100;
-                            LOG_DEBUG("Value: %d", fsm->hsv_current.value);
-                        }
-                        break;
-                    case 12: // Down arrow - decrease brightness
-                        if (row == 5) {
-                            fsm->hsv_current.value = (fsm->hsv_current.value > 5) ?
-                                                    fsm->hsv_current.value - 5 : 0;
-                            LOG_DEBUG("Value: %d", fsm->hsv_current.value);
-                        }
-                        break;
-                }
-
-                // Apply color to selected keys in real-time
-                Backlight_RGB_t current_color = HSV_to_RGB(fsm->hsv_current.hue,
-                                                          fsm->hsv_current.saturation,
-                                                          fsm->hsv_current.value);
-                for (uint8_t r = 0; r < 10; r++) {
-                    for (uint8_t c = 0; c < 14; c++) {
-                        if (fsm->selected_keys[r][c]) {
-                            Backlight_SetKeyRGB(r, c, current_color);
-                        }
-                    }
-                }
-            } else {
-                // Key selection mode
-                const rgb_led_mapping_t* led = get_led_for_key(row, col);
-                if (led) {
-                    // Toggle key selection
-                    if (fsm->selected_keys[row][col]) {
-                        // Deselect key
-                        fsm->selected_keys[row][col] = 0;
-                        fsm->selection_count--;
-                        Backlight_SetKeyRGB(row, col, CONFIG_DIM_COLOR);
-                        LOG_DEBUG("Key R%dC%d deselected", row, col);
-                    } else {
-                        // Select key
-                        fsm->selected_keys[row][col] = 1;
-                        fsm->selection_count++;
-                        Backlight_SetKeyRGB(row, col, CONFIG_ACTIVE_COLOR);
-                        LOG_DEBUG("Key R%dC%d selected", row, col);
-                    }
-                }
-            }
-            break;
-
-        default:
-            break;
-    }
-
-    g_config_ctx.session.changes_pending = true;
-    return CONFIG_OK;
-}
-
-static config_status_t process_effects_config_fsm(uint8_t row, uint8_t col, bool pressed)
-{
-    // Effects configuration FSM implementation
-    effects_config_fsm_t *fsm = &g_config_ctx.effects_fsm;
-
-    switch (fsm->state) {
-        case SECTION_FSM_ENTRY:
-            // Show effect type options
-            Backlight_SetAllRGB(CONFIG_DIM_COLOR);
-
-            // Show effect types on number row
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 1, CONFIG_SECTION_COLOR); // Static
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 2, CONFIG_SECTION_COLOR); // Breathing
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 3, CONFIG_SECTION_COLOR); // Color cycling
-
-            // Highlight current selection
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, fsm->effect_type, CONFIG_ACTIVE_COLOR);
-
-            fsm->state = SECTION_FSM_BROWSE;
-            break;
-
-        case SECTION_FSM_BROWSE:
-            // Handle effect type selection
-            if (row == CONFIG_SECTION_ROW && col >= 1 && col <= 3) {
-                fsm->effect_type = col;
-                LOG_INFO("Effect type %d selected", fsm->effect_type);
-
-                // Update highlight
-                for (uint8_t i = 1; i <= 3; i++) {
-                    Backlight_RGB_t color = (i == fsm->effect_type) ? CONFIG_ACTIVE_COLOR : CONFIG_SECTION_COLOR;
-                    Backlight_SetKeyRGB(CONFIG_SECTION_ROW, i, color);
-                }
-
-                fsm->state = SECTION_FSM_EDIT;
-            }
-            break;
-
-        case SECTION_FSM_EDIT:
-            // Handle parameter adjustment based on effect type
-            extern kb_state_t kb_state;
-
-            if (kb_state.fn_pressed) {
-                // Parameter adjustment with Fn + Arrow keys
-                switch (col) {
-                    case 11: // Left arrow - decrease parameter
-                        if (row == 4) {
-                            if (fsm->effect_type == 2 || fsm->effect_type == 3) { // breathing or cycling
-                                fsm->cycle_time_ms = (fsm->cycle_time_ms > 1000) ?
-                                                    fsm->cycle_time_ms - 500 : 1000;
-                                LOG_DEBUG("Cycle time: %dms", fsm->cycle_time_ms);
-                            }
-                        }
-                        break;
-                    case 13: // Right arrow - increase parameter
-                        if (row == 4) {
-                            if (fsm->effect_type == 2 || fsm->effect_type == 3) {
-                                fsm->cycle_time_ms = (fsm->cycle_time_ms < 10000) ?
-                                                    fsm->cycle_time_ms + 500 : 10000;
-                                LOG_DEBUG("Cycle time: %dms", fsm->cycle_time_ms);
-                            }
-                        }
-                        break;
-                    case 12: // Up arrow - increase brightness max
-                        if (row == 3) {
-                            fsm->brightness_max = (fsm->brightness_max < 100) ?
-                                                 fsm->brightness_max + 5 : 100;
-                            LOG_DEBUG("Max brightness: %d", fsm->brightness_max);
-                        }
-                        break;
-                    case 12: // Down arrow - decrease brightness max
-                        if (row == 5) {
-                            fsm->brightness_max = (fsm->brightness_max > fsm->brightness_min + 5) ?
-                                                 fsm->brightness_max - 5 : fsm->brightness_min + 5;
-                            LOG_DEBUG("Max brightness: %d", fsm->brightness_max);
-                        }
-                        break;
-                }
-
-                // Start preview if not active
-                if (!fsm->preview_active) {
-                    fsm->preview_active = true;
-                    LOG_INFO("Effect preview started");
-                    // TODO: Start preview effect with current parameters
-                }
-            } else {
-                // Handle color preset modification for cycling effect
-                if (fsm->effect_type == 3 && row == CONFIG_SECTION_ROW && col >= 1 && col <= 6) {
-                    uint8_t preset_idx = col - 1;
-                    // Cycle through hue values for this preset
-                    fsm->color_presets[preset_idx] = (fsm->color_presets[preset_idx] + 30) % 360;
-
-                    // Show color preview
-                    Backlight_RGB_t preview_color = HSV_to_RGB(fsm->color_presets[preset_idx], 100, 80);
-                    Backlight_SetKeyRGB(row, col, preview_color);
-
-                    LOG_DEBUG("Color preset %d: hue %d", preset_idx, fsm->color_presets[preset_idx]);
-                }
-            }
-            break;
-
-        default:
-            break;
-    }
-
-    g_config_ctx.session.changes_pending = true;
-    return CONFIG_OK;
-}
-
-static config_status_t process_power_config_fsm(uint8_t row, uint8_t col, bool pressed)
-{
-    // Power management FSM implementation
-    power_config_fsm_t *fsm = &g_config_ctx.power_fsm;
-
-    switch (fsm->state) {
-        case SECTION_FSM_ENTRY:
-            // Show power mode options
-            Backlight_SetAllRGB(CONFIG_DIM_COLOR);
-
-            // USB mode indicators (top row)
-            Backlight_SetKeyRGB(0, 1, CONFIG_SECTION_COLOR); // Always on
-            Backlight_SetKeyRGB(0, 2, CONFIG_SECTION_COLOR); // Dim
-            Backlight_SetKeyRGB(0, 3, CONFIG_SECTION_COLOR); // Off
-
-            // Battery mode indicators (number row)
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 1, CONFIG_SECTION_COLOR); // Always on
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 2, CONFIG_SECTION_COLOR); // Dim
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 3, CONFIG_SECTION_COLOR); // Off
-
-            // Highlight current selections
-            Backlight_SetKeyRGB(0, fsm->usb_mode, CONFIG_ACTIVE_COLOR);
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, fsm->battery_mode, CONFIG_ACTIVE_COLOR);
-
-            fsm->state = SECTION_FSM_BROWSE;
-            break;
-
-        case SECTION_FSM_BROWSE:
-            // Handle mode selection
-            if (row == 0 && col >= 1 && col <= 3) {
-                // USB mode selection
-                fsm->usb_mode = col;
-                LOG_INFO("USB mode %d selected", fsm->usb_mode);
-
-                // Update USB mode highlights
-                for (uint8_t i = 1; i <= 3; i++) {
-                    Backlight_RGB_t color = (i == fsm->usb_mode) ? CONFIG_ACTIVE_COLOR : CONFIG_SECTION_COLOR;
-                    Backlight_SetKeyRGB(0, i, color);
-                }
-
-                fsm->state = SECTION_FSM_EDIT;
-            } else if (row == CONFIG_SECTION_ROW && col >= 1 && col <= 3) {
-                // Battery mode selection
-                fsm->battery_mode = col;
-                LOG_INFO("Battery mode %d selected", fsm->battery_mode);
-
-                // Update battery mode highlights
-                for (uint8_t i = 1; i <= 3; i++) {
-                    Backlight_RGB_t color = (i == fsm->battery_mode) ? CONFIG_ACTIVE_COLOR : CONFIG_SECTION_COLOR;
-                    Backlight_SetKeyRGB(CONFIG_SECTION_ROW, i, color);
-                }
-
-                fsm->state = SECTION_FSM_EDIT;
-            }
-            break;
-
-        case SECTION_FSM_EDIT:
-            // Handle timeout adjustment
-            extern kb_state_t kb_state;
-
-            if (kb_state.fn_pressed) {
-                switch (col) {
-                    case 11: // Left arrow - decrease timeout
-                        if (row == 4) {
-                            if (fsm->usb_mode == 2) { // dim mode
-                                fsm->usb_timeout_s = (fsm->usb_timeout_s > 60) ?
-                                                    fsm->usb_timeout_s - 30 : 60;
-                                LOG_DEBUG("USB timeout: %ds", fsm->usb_timeout_s);
-                            }
-                            if (fsm->battery_mode == 2) { // dim mode
-                                fsm->battery_timeout_s = (fsm->battery_timeout_s > 30) ?
-                                                        fsm->battery_timeout_s - 30 : 30;
-                                LOG_DEBUG("Battery timeout: %ds", fsm->battery_timeout_s);
-                            }
-                        }
-                        break;
-                    case 13: // Right arrow - increase timeout
-                        if (row == 4) {
-                            if (fsm->usb_mode == 2) {
-                                fsm->usb_timeout_s = (fsm->usb_timeout_s < 600) ?
-                                                    fsm->usb_timeout_s + 30 : 600;
-                                LOG_DEBUG("USB timeout: %ds", fsm->usb_timeout_s);
-                            }
-                            if (fsm->battery_mode == 2) {
-                                fsm->battery_timeout_s = (fsm->battery_timeout_s < 300) ?
-                                                        fsm->battery_timeout_s + 30 : 300;
-                                LOG_DEBUG("Battery timeout: %ds", fsm->battery_timeout_s);
-                            }
-                        }
-                        break;
-                    case 12: // Up arrow - increase dim percentage
-                        if (row == 3) {
-                            fsm->dim_percentage = (fsm->dim_percentage < 50) ?
-                                                 fsm->dim_percentage + 5 : 50;
-                            LOG_DEBUG("Dim percentage: %d%%", fsm->dim_percentage);
-                        }
-                        break;
-                    case 12: // Down arrow - decrease dim percentage
-                        if (row == 5) {
-                            fsm->dim_percentage = (fsm->dim_percentage > 5) ?
-                                                 fsm->dim_percentage - 5 : 5;
-                            LOG_DEBUG("Dim percentage: %d%%", fsm->dim_percentage);
-                        }
-                        break;
-                }
-
-                // Start power preview if not active
-                if (!fsm->preview_active) {
-                    fsm->preview_active = true;
-                    LOG_INFO("Power preview started");
-                    // TODO: Show current power behavior
-                }
-            }
-            break;
-
-        default:
-            break;
-    }
-
-    g_config_ctx.session.changes_pending = true;
-    return CONFIG_OK;
-}
-
-static config_status_t process_brightness_config_fsm(uint8_t row, uint8_t col, bool pressed)
-{
-    // Brightness configuration FSM implementation
-    brightness_config_fsm_t *fsm = &g_config_ctx.brightness_fsm;
-
-    switch (fsm->state) {
-        case SECTION_FSM_ENTRY:
-            // Show brightness configuration interface
-            Backlight_SetAllRGB(CONFIG_DIM_COLOR);
-
-            // Show startup mode options
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 1, CONFIG_SECTION_COLOR); // Last used
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 2, CONFIG_SECTION_COLOR); // Preset
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, 3, CONFIG_SECTION_COLOR); // Adaptive
-
-            // Highlight current selection
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, fsm->startup_mode, CONFIG_ACTIVE_COLOR);
-
-            fsm->state = SECTION_FSM_BROWSE;
-            break;
-
-        case SECTION_FSM_BROWSE:
-            // Handle startup mode selection
-            if (row == CONFIG_SECTION_ROW && col >= 1 && col <= 3) {
-                fsm->startup_mode = col;
-                LOG_INFO("Startup mode %d selected", fsm->startup_mode);
-
-                // Update highlights
-                for (uint8_t i = 1; i <= 3; i++) {
-                    Backlight_RGB_t color = (i == fsm->startup_mode) ? CONFIG_ACTIVE_COLOR : CONFIG_SECTION_COLOR;
-                    Backlight_SetKeyRGB(CONFIG_SECTION_ROW, i, color);
-                }
-
-                fsm->state = SECTION_FSM_EDIT;
-            }
-            break;
-
-        case SECTION_FSM_EDIT:
-            // Handle brightness range adjustment
-            extern kb_state_t kb_state;
-
-            if (kb_state.fn_pressed) {
-                switch (col) {
-                    case 11: // Left arrow - decrease max brightness
-                        if (row == 4) {
-                            fsm->global_max = (fsm->global_max > fsm->global_min + 10) ?
-                                             fsm->global_max - 5 : fsm->global_min + 10;
-                            LOG_DEBUG("Max brightness: %d", fsm->global_max);
-                        }
-                        break;
-                    case 13: // Right arrow - increase max brightness
-                        if (row == 4) {
-                            fsm->global_max = (fsm->global_max < 127) ?
-                                             fsm->global_max + 5 : 127;
-                            LOG_DEBUG("Max brightness: %d", fsm->global_max);
-                        }
-                        break;
-                    case 12: // Up arrow - increase min brightness
-                        if (row == 3) {
-                            fsm->global_min = (fsm->global_min < fsm->global_max - 10) ?
-                                             fsm->global_min + 5 : fsm->global_max - 10;
-                            LOG_DEBUG("Min brightness: %d", fsm->global_min);
-                        }
-                        break;
-                    case 12: // Down arrow - decrease min brightness
-                        if (row == 5) {
-                            fsm->global_min = (fsm->global_min > 5) ?
-                                             fsm->global_min - 5 : 5;
-                            LOG_DEBUG("Min brightness: %d", fsm->global_min);
-                        }
-                        break;
-                }
-
-                // Apply brightness change for immediate feedback
-                uint8_t test_brightness = (fsm->global_min + fsm->global_max) / 2;
-                Backlight_SetGlobalBrightness(test_brightness);
-                LOG_DEBUG("Test brightness: %d", test_brightness);
-            }
-            break;
-
-        default:
-            break;
-    }
-
-    g_config_ctx.session.changes_pending = true;
-    return CONFIG_OK;
-}
-
-static void setup_config_mode_lighting(void)
-{
-    g_config_ctx.visual.config_mode_breathing = true;
-    g_config_ctx.visual.current_brightness = CONFIG_BREATH_MIN;
-    LOG_DEBUG("Config mode lighting setup complete");
-}
-
-static void update_breathing_effect(void)
-{
-    static uint32_t last_breath_update = 0;
-    static bool breathing_up = true;
-
-    uint32_t current_time = HAL_GetTick();
-
-    if ((current_time - last_breath_update) < 50) {
-        return;
-    }
-    last_breath_update = current_time;
-
-    // Simple breathing logic
-    if (breathing_up) {
-        g_config_ctx.visual.current_brightness += 2;
-        if (g_config_ctx.visual.current_brightness >= CONFIG_BREATH_MAX) {
-            breathing_up = false;
+    if (g_effect.config.runtime_mode == EFFECT_MODE_TRANSITION_BREATHING) {
+        // Transition mode: show transition_colors[0-9] on asdfghjkl (cols 1-10)
+        for (uint8_t i = 0; i < transition_color_count && i < 10; i++) {
+            Backlight_RGB_t color = Color_GetTransition(i);
+            bool is_selected = (i == g_effect.config.runtime_color_index);
+
+            Backlight_RGB_t display_color = is_selected ?
+                Color_Bright(color) : Color_Scale(color, 40);
+
+            Backlight_SetKeyRGB(EFFECTS_COLOR_KEY_ROW, i + 1, display_color);
         }
     } else {
-        g_config_ctx.visual.current_brightness -= 2;
-        if (g_config_ctx.visual.current_brightness <= CONFIG_BREATH_MIN) {
-            breathing_up = true;
+        // Static/Breathing mode: show breathing_colors[0-11] on asdfghjkl;' (cols 1-12)
+        for (uint8_t i = 0; i < breathing_color_count && i < 12; i++) {
+            Backlight_RGB_t color = Color_GetBreathing(i);
+            bool is_selected = (i == g_effect.config.runtime_color_index);
+
+            Backlight_RGB_t display_color = is_selected ?
+                Color_Bright(color) : Color_Scale(color, 60);
+
+            // Highlight editable color (index 11) slightly brighter
+            if (i == 11 && !is_selected) {
+                display_color = Color_Scale(color, 100);
+            }
+
+            Backlight_SetKeyRGB(EFFECTS_COLOR_KEY_ROW, i + 1, display_color);
         }
     }
+}
 
-    // Apply breathing to background
-    Backlight_RGB_t breath_color = Color_Scale(CONFIG_DIM_COLOR, g_config_ctx.visual.current_brightness);
+/**
+ * @brief Show HSV editing display with current color
+ */
+static void show_effects_hsv_display(void)
+{
+    Backlight_RGB_t current_color = Backlight_HSVtoRGB(
+        g_master_config.effects_hsv.hue,
+        g_master_config.effects_hsv.saturation,
+        g_master_config.effects_hsv.value
+    );
 
-    // Set background breathing (section indicators will override)
+    // Set dim background
     for (uint8_t row = 0; row < 6; row++) {
         for (uint8_t col = 0; col < 14; col++) {
-            const rgb_led_mapping_t* led = get_led_for_key(row, col);
-            if (led && !(row == CONFIG_SECTION_ROW && col >= 1 && col <= 4)) {
-                Backlight_SetKeyRGB(row, col, breath_color);
+            if (Backlight_HasLED(row, col)) {
+                Backlight_SetKeyRGB(row, col, (Backlight_RGB_t){2, 2, 2});
             }
         }
     }
+
+    // Show current color on target key
+    uint8_t target_col = g_master_config.effects_editing_color_index + 1;
+    Backlight_SetKeyRGB(EFFECTS_COLOR_KEY_ROW, target_col, current_color);
+
 }
 
-static void show_section_indicators(void)
+/**
+ * @brief Enter HSV editing mode for a specific color
+ */
+static config_status_t effects_enter_hsv_mode(uint8_t color_index)
 {
-    // Keep section keys highlighted
-    for (uint8_t col = 1; col <= 4; col++) {
-        const rgb_led_mapping_t* led = get_led_for_key(CONFIG_SECTION_ROW, col);
-        if (led) {
-            Backlight_SetKeyRGB(CONFIG_SECTION_ROW, col, CONFIG_SECTION_COLOR);
+    if (!effects_is_color_editable(color_index)) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    g_master_config.effects_state = EFFECTS_STATE_HSV_EDIT;
+    g_master_config.effects_editing_color_index = color_index;
+    g_master_config.effects_hsv_start_time = HAL_GetTick();
+    g_master_config.right_alt_pressed = false;
+
+    // Initialize HSV values from current color
+    Backlight_RGB_t current_color;
+    if (g_effect.config.runtime_mode == EFFECT_MODE_TRANSITION_BREATHING) {
+        current_color = Color_GetTransition(color_index);
+    } else {
+        current_color = Color_GetBreathing(color_index);
+    }
+
+    // Start with reasonable HSV defaults
+    g_master_config.effects_hsv.hue = 0;
+    g_master_config.effects_hsv.saturation = 100;
+    g_master_config.effects_hsv.value = 80;
+    g_master_config.effects_hsv.hue_step = 5;
+    g_master_config.effects_hsv.sv_step = 5;
+
+    show_effects_hsv_display();
+
+    LOG_INFO("Entered HSV edit mode for color index %d", color_index);
+    return CONFIG_OK;
+}
+
+/**
+ * @brief Exit HSV editing mode and apply/discard changes
+ */
+static void effects_exit_hsv_mode(bool apply_changes)
+{
+    if (g_master_config.effects_state != EFFECTS_STATE_HSV_EDIT) {
+        return;
+    }
+
+    if (apply_changes) {
+        Backlight_RGB_t new_color = Backlight_HSVtoRGB(
+            g_master_config.effects_hsv.hue,
+            g_master_config.effects_hsv.saturation,
+            g_master_config.effects_hsv.value
+        );
+
+        // Direct array modification - simple and clean!
+        if (g_effect.config.runtime_mode == EFFECT_MODE_TRANSITION_BREATHING) {
+            transition_colors[g_master_config.effects_editing_color_index] = new_color;
+        } else {
+            breathing_colors[11] = new_color;
+        }
+
+        g_master_config.effects_changes_pending = true;
+        g_master_config.has_unsaved_changes = true;
+        g_master_config.sections_modified_mask |= (1 << 1);
+    }
+    g_master_config.right_alt_pressed = false;
+    g_master_config.effects_state = EFFECTS_STATE_MODE_AND_COLOR;
+    update_effects_config_display();
+}
+
+static config_status_t effects_adjust_hue(int8_t direction)
+{
+    if (g_master_config.effects_state != EFFECTS_STATE_HSV_EDIT) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    int16_t new_hue = g_master_config.effects_hsv.hue + (direction * g_master_config.effects_hsv.hue_step);
+    if (new_hue < 0) new_hue += 360;
+    else if (new_hue >= 360) new_hue -= 360;
+
+    g_master_config.effects_hsv.hue = (uint16_t)new_hue;
+    show_effects_hsv_display();
+    return CONFIG_OK;
+}
+
+static config_status_t effects_adjust_saturation(int8_t direction)
+{
+    if (g_master_config.effects_state != EFFECTS_STATE_HSV_EDIT) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    int16_t new_sat = g_master_config.effects_hsv.saturation + (direction * g_master_config.effects_hsv.sv_step);
+    if (new_sat < 0) new_sat = 0;
+    else if (new_sat > 100) new_sat = 100;
+
+    g_master_config.effects_hsv.saturation = (uint8_t)new_sat;
+    show_effects_hsv_display();
+    return CONFIG_OK;
+}
+
+static config_status_t effects_adjust_value(int8_t direction)
+{
+    if (g_master_config.effects_state != EFFECTS_STATE_HSV_EDIT) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    int16_t new_val = g_master_config.effects_hsv.value + (direction * g_master_config.effects_hsv.sv_step);
+    if (new_val < 1) new_val = 1;
+    else if (new_val > 100) new_val = 100;
+
+    g_master_config.effects_hsv.value = (uint8_t)new_val;
+    show_effects_hsv_display();
+    return CONFIG_OK;
+}
+
+static bool handle_effects_mode_selection(uint8_t col)
+{
+    effect_mode_t new_mode;
+    switch(col) {
+        case 1: new_mode = EFFECT_MODE_STATIC; break;
+        case 2: new_mode = EFFECT_MODE_BREATHING; break;
+        case 3: new_mode = EFFECT_MODE_TRANSITION_BREATHING; break;
+        default: return false;
+    }
+
+    if (new_mode != g_effect.config.runtime_mode) {
+        g_effect.config.runtime_mode = new_mode;
+        g_effect.config.runtime_color_index = 0; // Reset to first color
+
+        g_master_config.effects_changes_pending = true;
+        g_master_config.has_unsaved_changes = true;
+        g_master_config.sections_modified_mask |= (1 << 1);
+    }
+
+    update_effects_config_display();
+    return true;
+}
+
+static bool handle_effects_color_selection(uint8_t col)
+{
+    uint8_t color_index = effects_col_to_color_index(col);
+
+    if (!effects_is_color_valid(color_index)) {
+        return false;
+    }
+
+    if (color_index != g_effect.config.runtime_color_index) {
+        g_effect.config.runtime_color_index = color_index;
+        g_master_config.effects_changes_pending = true;
+        g_master_config.has_unsaved_changes = true;
+        g_master_config.sections_modified_mask |= (1 << 1);
+    }
+
+    show_effects_color_indicators();
+    return true;
+}
+
+static bool handle_effects_hsv_keys(uint8_t row, uint8_t col)
+{
+    uint8_t keycode = layers[BASE_LAYER][row][col];
+
+    switch (keycode) {
+        case KC_W: effects_adjust_value(1); return true;
+        case KC_S: effects_adjust_value(-1); return true;
+        case KC_A: effects_adjust_saturation(-1); return true;
+        case KC_D: effects_adjust_saturation(1); return true;
+        case KC_Q: effects_adjust_hue(-1); return true;
+        case KC_E: effects_adjust_hue(1); return true;
+        default: return false;
+    }
+}
+
+static bool handle_effects_right_alt_combinations(uint8_t row, uint8_t col)
+{
+    if (g_master_config.state != MASTER_STATE_EFFECTS_CONFIG) {
+        return false;
+    }
+
+    // R_Alt + Enter = Apply HSV changes
+    if (layers[BASE_LAYER][row][col] == KC_ENTER &&
+        g_master_config.effects_state == EFFECTS_STATE_HSV_EDIT) {
+        effects_exit_hsv_mode(true);
+        return true;
+    }
+
+    // R_Alt + Backspace = Cancel HSV changes
+    if (layers[BASE_LAYER][row][col] == KC_BSPACE &&
+        g_master_config.effects_state == EFFECTS_STATE_HSV_EDIT) {
+        effects_exit_hsv_mode(false);
+        return true;
+    }
+
+    // R_Alt + color keys = Enter HSV edit mode
+    if (row == EFFECTS_COLOR_KEY_ROW && col >= 1 && col <= 12) {
+        uint8_t color_index = effects_col_to_color_index(col);
+        if (effects_is_color_editable(color_index)) {
+            return (effects_enter_hsv_mode(color_index) == CONFIG_OK);
         }
     }
-}
 
-static void flash_confirmation(Backlight_RGB_t color, uint16_t duration_ms)
-{
-    // Simple flash implementation
-    Backlight_SetAllRGB(color);
-    HAL_Delay(duration_ms);
-
-    // Restore appropriate lighting
-    if (g_config_ctx.current_state == CONFIG_UI_MENU) {
-        config_ui_show_menu_indicators();
-    }
-}
-
-static config_status_t handle_error(config_status_t error)
-{
-    g_config_ctx.session.error_count++;
-    g_config_ctx.session.last_error = error;
-
-    LOG_ERROR("Config UI error %d (count: %d)", error, g_config_ctx.session.error_count);
-
-    flash_confirmation(CONFIG_CANCEL_COLOR, 200);
-
-    if (g_config_ctx.session.error_count >= CONFIG_MAX_ERRORS) {
-        LOG_ERROR("Too many errors - force exiting");
-        config_ui_force_exit();
-    }
-
-    return error;
-}
-
-/* ========================================================================
- * VISUAL FEEDBACK FUNCTIONS
- * ======================================================================== */
-
-void config_ui_flash_save_success(void)
-{
-    flash_confirmation(CONFIG_SAVE_COLOR, CONFIG_FLASH_DURATION_MS);
-}
-
-void config_ui_flash_save_error(void)
-{
-    flash_confirmation(CONFIG_CANCEL_COLOR, CONFIG_FLASH_DURATION_MS);
-}
-
-void config_ui_flash_cancel(void)
-{
-    flash_confirmation(CONFIG_CANCEL_COLOR, CONFIG_FLASH_DURATION_MS);
-}
-
-void config_ui_flash_timeout_warning(void)
-{
-    flash_confirmation(CONFIG_WARNING_COLOR, CONFIG_FLASH_DURATION_MS);
+    return false;
 }

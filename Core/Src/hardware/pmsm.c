@@ -180,6 +180,8 @@ static void PM_EnterStopMode(void) {
     	Effects_EnterLPM(g_connection_mode == CONNECTION_USB);
     	g_effect.config.lpm_backlight_off = true;
 
+    	uint32_t primask = __get_PRIMASK();
+    			__disable_irq();
 		// Configure STOPWUCK to use HSI16 for faster wakeup
 		RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_STOPWUCK) | RCC_CFGR_STOPWUCK;
 
@@ -214,6 +216,7 @@ static void PM_EnterStopMode(void) {
 
 		// Disable systick interrupt during STOP
 		SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
+		__set_PRIMASK(primask);
     }
     // Enter STOP mode with regulator in main mode
     PWR->CR = (PWR->CR & ~PWR_CR_LPSDSR) | PWR_CR_CWUF;
@@ -281,7 +284,10 @@ void PM_HandleWakeup(void) {
     #ifdef DEBUG_POWER
     dbg_pm_events++;
     #endif
-    WDG_Refresh();
+    uint32_t primask = __get_PRIMASK();
+	__disable_irq();
+
+	WDG_Refresh();
     // Record activity to reset timeouts
     last_activity_time = HAL_GetTick();
 
@@ -290,8 +296,6 @@ void PM_HandleWakeup(void) {
     if (g_connection_mode == CONNECTION_BLE && g_bm70.initialized) {
 		lpm_flag = true;
 	}
-
-
 
     if (current_pm_state == PM_STATE_STOP) {
         current_pm_state = PM_STATE_ACTIVE;
@@ -315,6 +319,7 @@ void PM_HandleWakeup(void) {
 		// Disable EXTI for normal operation
 		PM_ConfigureKeyEXTI(false);
     }
+    __set_PRIMASK(primask);
 }
 
 /**
@@ -344,8 +349,9 @@ void PM_Update(void) {
 
     if(g_effect.config.lpm_backlight_off == false
     		&& g_effect.config.lpm_backlight_restore == true){
-    		Effects_ExitLPM(g_connection_mode == CONNECTION_USB);
-    		g_effect.config.lpm_backlight_restore = false;
+    		if((Effects_ExitLPM(g_connection_mode == CONNECTION_USB)) == EFFECT_COMPLETE){
+    			g_effect.config.lpm_backlight_restore = false;
+    		}
     	}
 
     if (lpm_flag == true){
@@ -373,7 +379,6 @@ void PM_Update(void) {
         WDG_Refresh();
     }
 }
-
 /**
  * @brief Configure key EXTI for wakeup
  * @param enable Enable or disable EXTI for keys

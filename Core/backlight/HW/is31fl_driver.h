@@ -41,6 +41,7 @@
 #define IS31FL_CONFIG_SSD       0x01  // Software shutdown disable
 #define IS31FL_CONFIG_OSDE_OPEN 0x02  // Open detection
 #define IS31FL_CONFIG_OSDE_SHORT 0x04 // Short detection
+#define IS31FL_REG_THERMAL_CONFIG    0x24
 
 // I2C Addresses (7-bit)
 #define IS31FL_ADDR_0  			0x40  // ADDR2=GND, ADDR1=GND
@@ -62,6 +63,21 @@ typedef enum {
     IS31FL_ERROR_PARAM,
     IS31FL_ERROR_DEVICE
 } IS31FL_Error_t;
+
+// TROF (Thermal Roll-off) values - percentage of output current
+typedef enum {
+    IS31FL_TROF_100_PERCENT = 0x00,    // 100% - No reduction
+    IS31FL_TROF_75_PERCENT  = 0x01,    // 75%
+    IS31FL_TROF_55_PERCENT  = 0x02,    // 55% (was 0x10)
+    IS31FL_TROF_30_PERCENT  = 0x03     // 30% (was 0x11)
+} IS31FL_TROF_t;
+
+typedef enum {
+    IS31FL_TS_140C = 0x00,    // 140°C
+    IS31FL_TS_120C = 0x01,    // 120°C
+    IS31FL_TS_100C = 0x02,    // 100°C (was 0x10)
+    IS31FL_TS_90C  = 0x03     // 90°C (was 0x11)
+} IS31FL_TS_t;
 
 // I2C Interface Functions (implement these for your platform)
 typedef struct {
@@ -118,6 +134,17 @@ uint8_t IS31FL_GetRegisterAddr(uint8_t cs, uint8_t sw);
 bool IS31FL_ValidatePosition(uint8_t cs, uint8_t sw);
 IS31FL_Error_t SelectPageWrapper(const IS31FL_Context_t *ctx, uint8_t device_idx,
                                 uint8_t page);
+IS31FL_Error_t IS31FL_ReadTemperature(IS31FL_Context_t *ctx, uint8_t device_idx, uint8_t *temp_raw);
+uint8_t IS31FL_TempToCelsius(uint8_t temp_raw);
+IS31FL_Error_t IS31FL_IsThermalProtected(IS31FL_Context_t *ctx, uint8_t device_idx, bool *is_protected);
+IS31FL_Error_t IS31FL_SetTROF(IS31FL_Context_t *ctx, uint8_t device_idx, IS31FL_TROF_t trof);
+IS31FL_Error_t IS31FL_SetTS(IS31FL_Context_t *ctx, uint8_t device_idx, IS31FL_TS_t ts);
+IS31FL_Error_t IS31FL_ConfigureThermalProtection(IS31FL_Context_t *ctx, uint8_t device_idx,
+                                                 IS31FL_TS_t ts, IS31FL_TROF_t trof);
+IS31FL_Error_t IS31FL_ReadTROF(IS31FL_Context_t *ctx, uint8_t device_idx, IS31FL_TROF_t *trof);
+IS31FL_Error_t IS31FL_ReadTS(IS31FL_Context_t *ctx, uint8_t device_idx, IS31FL_TS_t *ts);
+IS31FL_Error_t IS31FL_ReadThermalConfig(IS31FL_Context_t *ctx, uint8_t device_idx, uint8_t *thermal_config);
+
 // Gamma Correction Table (32 steps)
 extern const uint8_t IS31FL_GAMMA_TABLE[32];
 

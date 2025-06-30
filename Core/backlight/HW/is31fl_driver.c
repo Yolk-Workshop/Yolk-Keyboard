@@ -101,13 +101,7 @@ IS31FL_Error_t IS31FL_AddDevice(IS31FL_Context_t *ctx, uint8_t i2c_addr)
         LOG_ERROR("IS31FL: Failed to select page 2 for device 0x%02X", i2c_addr);
         return IS31FL_ERROR_DEVICE;
     }
-    // Step 3: Configure for 3.3V logic levels and enable device
-    // Register 0x00: Bit 0 (SSD) = 1 (enable), Bit 3 (LGC) = 0 (3.3V logic)
-    err = ctx->i2c_if->write_reg_byte(i2c_addr, IS31FL_REG_CONFIG, 0x01);
-    if (err != IS31FL_OK) {
-        LOG_ERROR("IS31FL: Failed to configure device 0x%02X for 3.3V I2C", i2c_addr);
-        return IS31FL_ERROR_DEVICE;
-    }
+
     // Add device to context
     IS31FL_Device_t *device = &ctx->devices[ctx->device_count];
     device->i2c_addr = i2c_addr;
@@ -159,12 +153,25 @@ IS31FL_Error_t IS31FL_DeviceInit(IS31FL_Context_t *ctx, uint8_t device_idx)
     }
 
     // Set maximum global current
-    err = WriteRegister(ctx, device_idx, IS31FL_REG_GLOBAL_CURRENT, 0x80);
+    err = WriteRegister(ctx, device_idx, IS31FL_REG_GLOBAL_CURRENT, 0x40);
     if (err != IS31FL_OK) {
         LOG_ERROR("IS31FL: Device %d global current set failed", device_idx);
         return err;
     }
+    if(device_idx == 0){
+    	uint8_t thermal_config = (IS31FL_TS_140C << 2) | IS31FL_TROF_100_PERCENT;
+		err = WriteRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, thermal_config);
+		if (err != IS31FL_OK) {
+			LOG_ERROR("IS31FL: Device 0 Thermal protection threshold set failed");
+			return err;
+		}
 
+		err = WriteRegister(ctx, device_idx, 0x25, 0x31);
+		if (err != IS31FL_OK) {
+			LOG_ERROR("IS31FL: Device 0 failed to set Spread Spectrum");
+			return err;
+		}
+    }
     // Configure pull-up/down resistors for de-ghosting
     err = WriteRegister(ctx, device_idx, IS31FL_REG_PULLUP, 0x00);
     if (err != IS31FL_OK) {
@@ -478,4 +485,211 @@ static IS31FL_Error_t SelectPage(const IS31FL_Context_t *ctx, uint8_t device_idx
 static IS31FL_Error_t UnlockCommand(const IS31FL_Context_t *ctx, uint8_t device_idx)
 {
     return WriteRegister(ctx, device_idx, IS31FL_REG_UNLOCK, 0xC5);
+}
+
+/**
+ * @brief Read device temperature register
+ */
+IS31FL_Error_t IS31FL_ReadTemperature(IS31FL_Context_t *ctx, uint8_t device_idx, uint8_t *temp_raw)
+{
+    if (!ctx || device_idx >= ctx->device_count || !temp_raw) {
+        return IS31FL_ERROR_PARAM;
+    }
+
+    IS31FL_Error_t err = SelectPage(ctx, device_idx, IS31FL_PAGE_FUNCTION);
+    if (err != IS31FL_OK) return err;
+
+    uint8_t temp_reg;
+    err = ReadRegister(ctx, device_idx, 0xDB, &temp_reg);
+    if (err != IS31FL_OK) return err;
+
+    // Extract temperature from upper 4 bits
+    *temp_raw = (temp_reg >> 4) & 0x0F;
+
+    return IS31FL_OK;
+}
+
+/**
+ * @brief Convert raw temperature to estimated Celsius
+ */
+uint8_t IS31FL_TempToCelsius(uint8_t temp_raw)
+{
+    // Based on IS31FL3743A datasheet thermal rollback points
+    switch (temp_raw & 0x0F) {
+        case 0x00: return 85;   // Normal operation
+        case 0x01: return 95;   // Approaching 90°C threshold
+        case 0x02: return 105;  // 100°C threshold (30% reduction)
+        case 0x03: return 115;  // 110°C threshold (55% reduction)
+        default:   return 125;  // 120°C+ threshold (75% reduction)
+    }
+}
+
+/**
+ * @brief Check if device is in thermal protection mode
+ */
+IS31FL_Error_t IS31FL_IsThermalProtected(IS31FL_Context_t *ctx, uint8_t device_idx, bool *is_protected)
+{
+    if (!ctx || device_idx >= ctx->device_count || !is_protected) {
+        return IS31FL_ERROR_PARAM;
+    }
+
+    uint8_t temp_raw;
+    IS31FL_Error_t err = IS31FL_ReadTemperature(ctx, device_idx, &temp_raw);
+    if (err != IS31FL_OK) return err;
+
+    // Device is in thermal protection if temp_raw > 0
+    *is_protected = (temp_raw > 0);
+
+    return IS31FL_OK;
+}
+
+IS31FL_Error_t IS31FL_SetTROF(IS31FL_Context_t *ctx, uint8_t device_idx, IS31FL_TROF_t trof)
+{
+    if (!ctx || device_idx >= ctx->device_count) {
+        return IS31FL_ERROR_PARAM;
+    }
+
+    IS31FL_Error_t err = SelectPage(ctx, device_idx, IS31FL_PAGE_FUNCTION);
+    if (err != IS31FL_OK) return err;
+
+    // Read current thermal config register
+    uint8_t thermal_reg;
+    err = ReadRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, &thermal_reg);
+    if (err != IS31FL_OK) return err;
+
+    // Clear TROF bits (D1:D0) and set new value
+    thermal_reg &= 0xFC;  // Clear lower 2 bits
+    thermal_reg |= trof;  // Set new TROF value in bits 1:0
+
+    err = WriteRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, thermal_reg);
+
+    LOG_INFO("Device %d TROF set to %d%%", device_idx,
+             (trof == IS31FL_TROF_100_PERCENT) ? 100 :
+             (trof == IS31FL_TROF_75_PERCENT) ? 75 :
+             (trof == IS31FL_TROF_55_PERCENT) ? 55 : 30);
+
+    return err;
+}
+
+
+/**
+ * @brief Set thermal start point (TS)
+ */
+IS31FL_Error_t IS31FL_SetTS(IS31FL_Context_t *ctx, uint8_t device_idx, IS31FL_TS_t ts)
+{
+    if (!ctx || device_idx >= ctx->device_count) {
+        return IS31FL_ERROR_PARAM;
+    }
+
+    IS31FL_Error_t err = SelectPage(ctx, device_idx, IS31FL_PAGE_FUNCTION);
+    if (err != IS31FL_OK) return err;
+
+    // Read current thermal config register
+    uint8_t thermal_reg;
+    err = ReadRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, &thermal_reg);
+    if (err != IS31FL_OK) return err;
+
+    // Clear TS bits (D3:D2) and set new value
+    thermal_reg &= 0xF3;  // Clear bits 3:2
+    thermal_reg |= (ts << 2);    // Set new TS value in bits 3:2
+
+    err = WriteRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, thermal_reg);
+
+    LOG_INFO("Device %d TS set to %d°C", device_idx,
+             (ts == IS31FL_TS_90C) ? 90 :
+             (ts == IS31FL_TS_100C) ? 100 :
+             (ts == IS31FL_TS_120C) ? 120 : 140);
+
+    return err;
+}
+
+/**
+ * @brief Configure thermal protection settings
+ */
+IS31FL_Error_t IS31FL_ConfigureThermalProtection(IS31FL_Context_t *ctx, uint8_t device_idx,
+                                                 IS31FL_TS_t ts, IS31FL_TROF_t trof)
+{
+    if (!ctx || device_idx >= ctx->device_count) {
+        return IS31FL_ERROR_PARAM;
+    }
+
+    IS31FL_Error_t err = SelectPage(ctx, device_idx, IS31FL_PAGE_FUNCTION);
+    if (err != IS31FL_OK) return err;
+
+    // Combine TS and TROF into single register value
+    // TS in bits 3:2, TROF in bits 1:0
+    uint8_t thermal_config = (ts << 2) | trof;
+
+    err = WriteRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, thermal_config);
+
+    if (err == IS31FL_OK) {
+        LOG_INFO("Device %d thermal protection: %d°C start, %d%% reduction",
+                 device_idx,
+                 (ts == IS31FL_TS_90C) ? 90 : (ts == IS31FL_TS_100C) ? 100 :
+                 (ts == IS31FL_TS_120C) ? 120 : 140,
+                 (trof == IS31FL_TROF_100_PERCENT) ? 100 : (trof == IS31FL_TROF_75_PERCENT) ? 75 :
+                 (trof == IS31FL_TROF_55_PERCENT) ? 55 : 30);
+    }
+
+    return err;
+}
+
+
+/**
+ * @brief Read current TROF setting
+ */
+IS31FL_Error_t IS31FL_ReadTROF(IS31FL_Context_t *ctx, uint8_t device_idx, IS31FL_TROF_t *trof)
+{
+    if (!ctx || device_idx >= ctx->device_count || !trof) {
+        return IS31FL_ERROR_PARAM;
+    }
+
+    IS31FL_Error_t err = SelectPage(ctx, device_idx, IS31FL_PAGE_FUNCTION);
+    if (err != IS31FL_OK) return err;
+
+    uint8_t thermal_reg;
+    err = ReadRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, &thermal_reg);
+    if (err != IS31FL_OK) return err;
+
+    // Extract TROF from lower 2 bits (D1:D0)
+    *trof = (IS31FL_TROF_t)(thermal_reg & 0x03);
+
+    return IS31FL_OK;
+}
+
+/**
+ * @brief Read current TS setting
+ */
+IS31FL_Error_t IS31FL_ReadTS(IS31FL_Context_t *ctx, uint8_t device_idx, IS31FL_TS_t *ts)
+{
+    if (!ctx || device_idx >= ctx->device_count || !ts) {
+        return IS31FL_ERROR_PARAM;
+    }
+
+    IS31FL_Error_t err = SelectPage(ctx, device_idx, IS31FL_PAGE_FUNCTION);
+    if (err != IS31FL_OK) return err;
+
+    uint8_t thermal_reg;
+    err = ReadRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, &thermal_reg);
+    if (err != IS31FL_OK) return err;
+
+    // Extract TS from bits 3:2
+    *ts = (IS31FL_TS_t)((thermal_reg >> 2) & 0x03);
+
+    return IS31FL_OK;
+}
+
+/**
+ * @brief Read thermal configuration register raw value
+ */
+IS31FL_Error_t IS31FL_ReadThermalConfig(IS31FL_Context_t *ctx, uint8_t device_idx, uint8_t *thermal_config)
+{
+    if (!ctx || device_idx >= ctx->device_count || !thermal_config) {
+        return IS31FL_ERROR_PARAM;
+    }
+
+    IS31FL_Error_t err = SelectPage(ctx, device_idx, IS31FL_PAGE_FUNCTION);
+    if (err != IS31FL_OK) return err;
+
+    return ReadRegister(ctx, device_idx, IS31FL_REG_THERMAL_CONFIG, thermal_config);
 }

@@ -9,6 +9,19 @@
 #include "system_config.h"
 #include "eeprom_memory_map.h"
 #include <string.h>
+#include "logger.h"
+
+// Function pointer variable
+static const zone_interface_t *zone_interface_ptr = NULL;
+
+typedef struct {
+    staging_key_t keys[MAX_STAGING_KEYS];
+    uint8_t key_count;
+    uint8_t editing_zone_id;
+    bool session_active;
+} g_staging_t;
+
+static g_staging_t g_staging = {0};
 
 /* External dependencies */
 extern uint32_t HAL_GetTick(void);
@@ -556,6 +569,141 @@ config_status_t zone_assign_set_global_enabled(bool enabled)
 
 	return status;
 }
+
+bool zone_is_slot_occupied(uint8_t slot_id)
+{
+    if (slot_id >= 8) return false;
+
+    // For slots 0-1: Check runtime cache first
+	if (slot_id <= 1 && zone_interface_ptr && zone_interface_ptr->is_runtime_slot_occupied) {
+		if (zone_interface_ptr->is_runtime_slot_occupied(slot_id)) {
+			return true;
+		}
+	}
+
+	//Check EEPROM slots
+    if(!g_eeprom_handle){
+		uint8_t led_count;
+		uint16_t zone_address = ZONE_ADDRESS(slot_id, ZONE_LED_COUNT_OFFSET);
+
+		if (read_eeprom_field(zone_address, &led_count, 1) == CONFIG_OK) {
+			return (led_count > 0);
+		}
+    }
+
+    return false;
+}
+
+config_status_t zone_get_basic_info(uint8_t slot_id, uint8_t *led_count,
+                                   rgb_color_t *primary_color, bool *enabled)
+{
+    if (slot_id >= 8 || !g_eeprom_handle) return CONFIG_INVALID_PARAMETER;
+
+    uint16_t zone_base = ZONE_ADDRESS(slot_id, 0);
+    config_status_t status;
+
+    if (led_count) {
+        status = read_eeprom_field(zone_base + ZONE_LED_COUNT_OFFSET, led_count, 1);
+        if (status != CONFIG_OK) return status;
+    }
+
+    if (primary_color) {
+        status = read_eeprom_field(zone_base + ZONE_COLOR_OFFSET, primary_color,
+                                  sizeof(rgb_color_t));
+        if (status != CONFIG_OK) return status;
+    }
+
+    if (enabled) {
+        uint8_t enabled_flag;
+        status = read_eeprom_field(zone_base + ZONE_ENABLED_OFFSET, &enabled_flag, 1);
+        if (status != CONFIG_OK) return status;
+        *enabled = (enabled_flag != 0);
+    }
+
+    return CONFIG_OK;
+}
+
+config_status_t zone_get_led_indices_raw(uint8_t slot_id, uint8_t *indices,
+                                         uint8_t max_indices, uint8_t *actual_count)
+{
+    // Modify to return full key data instead of just indices
+    if (!indices || slot_id >= 8 || max_indices < 32 || !g_eeprom_handle) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    uint16_t zone_base = ZONE_ADDRESS(slot_id, 0);
+
+    // Get LED count
+    uint8_t led_count;
+    config_status_t status = read_eeprom_field(zone_base + ZONE_LED_COUNT_OFFSET,
+                                              &led_count, 1);
+    if (status != CONFIG_OK) return status;
+
+    if (actual_count) {
+        *actual_count = led_count;
+    }
+
+    // Read enhanced LED data: [index][R][G][B] per key
+    uint8_t led_data[32 * 4];
+    status = read_eeprom_field(zone_base + ZONE_LED_INDICES_OFFSET, led_data, led_count * 4);
+    if (status != CONFIG_OK) return status;
+
+    // Extract just indices for backward compatibility
+    for (uint8_t i = 0; i < led_count && i < max_indices; i++) {
+        indices[i] = led_data[i * 4];  // First byte is LED index
+    }
+
+    return CONFIG_OK;
+}
+
+config_status_t zone_save_basic_data(uint8_t slot_id, uint8_t led_count,
+                                     const staging_key_t *keys)
+{
+    // Change to: const staging_key_t *keys instead of separate arrays
+    if (slot_id >= 8 || !keys || !g_eeprom_handle) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    uint16_t zone_base = ZONE_ADDRESS(slot_id, 0);
+    config_status_t status;
+
+    // Save LED count
+    status = write_eeprom_field(zone_base + ZONE_LED_COUNT_OFFSET, &led_count, 1);
+    if (status != CONFIG_OK) return status;
+
+    // Save individual key data: [index][R][G][B] per key
+    uint8_t led_data[32 * 4] = {0};
+    for (uint8_t i = 0; i < led_count && i < 32; i++) {
+        uint8_t led_index;
+        if (get_led_index_for_key(keys[i].row, keys[i].col, &led_index)) {
+            uint8_t base_offset = i * 4;
+            led_data[base_offset + 0] = led_index;
+            led_data[base_offset + 1] = keys[i].color.red;
+            led_data[base_offset + 2] = keys[i].color.green;
+            led_data[base_offset + 3] = keys[i].color.blue;
+        }
+    }
+
+    // Save to LED indices area (now LED data area)
+    status = write_eeprom_field(zone_base + ZONE_LED_INDICES_OFFSET, led_data, led_count * 4);
+    if (status != CONFIG_OK) return status;
+
+    // Keep primary color for backward compatibility (use first key's color)
+    rgb_color_t fallback_color = led_count > 0 ? keys[0].color : (rgb_color_t){255,255,255};
+    status = write_eeprom_field(zone_base + ZONE_COLOR_OFFSET, &fallback_color,
+                               sizeof(rgb_color_t));
+    if (status != CONFIG_OK) return status;
+
+    // Enable zone
+    uint8_t enabled = 1;
+    status = write_eeprom_field(zone_base + ZONE_ENABLED_OFFSET, &enabled, 1);
+    if (status != CONFIG_OK) return status;
+
+    system_update_section_crc(1);
+    return CONFIG_OK;
+}
+
+
 
 /* ========================================================================
  * ZONE EFFECTS API
@@ -1170,28 +1318,6 @@ config_status_t operational_increment_power_cycles(void)
  * SESSION MANAGEMENT API
  * ======================================================================== */
 
-config_status_t session_begin_edit(uint8_t zone_id)
-{
-	if (!IS_VALID_ZONE_ID(zone_id) || !g_eeprom_handle) {
-		return CONFIG_INVALID_PARAMETER;
-	}
-
-	config_status_t status;
-
-	status = write_eeprom_field(CURRENT_EDIT_ZONE, &zone_id, 1);
-	if (status != CONFIG_OK) return status;
-
-	uint32_t timestamp = get_current_timestamp();
-	status = write_eeprom_field(LAST_EDIT_TIMESTAMP, &timestamp,
-			sizeof(uint32_t));
-	if (status != CONFIG_OK) return status;
-
-	uint8_t unsaved = 0;
-	status = write_eeprom_field(UNSAVED_CHANGES, &unsaved, 1);
-
-	return status;
-}
-
 config_status_t session_has_unsaved_changes(bool *has_changes)
 {
 	if (!has_changes || !g_eeprom_handle) {
@@ -1207,29 +1333,6 @@ config_status_t session_has_unsaved_changes(bool *has_changes)
 	}
 
 	return status;
-}
-
-config_status_t session_commit_changes(void)
-{
-	if (!g_eeprom_handle) {
-		return CONFIG_INVALID_PARAMETER;
-	}
-
-	system_update_section_crc(1); // Zone data
-	system_update_section_crc(2); // User config
-
-	uint8_t unsaved = 0;
-	return write_eeprom_field(UNSAVED_CHANGES, &unsaved, 1);
-}
-
-config_status_t session_discard_changes(void)
-{
-	if (!g_eeprom_handle) {
-		return CONFIG_INVALID_PARAMETER;
-	}
-
-	uint8_t unsaved = 0;
-	return write_eeprom_field(UNSAVED_CHANGES, &unsaved, 1);
 }
 
 config_status_t session_backup_current_state(void)
@@ -1257,6 +1360,204 @@ config_status_t session_restore_backup_state(void)
 	}
 
 	return status;
+}
+
+config_status_t session_begin_edit(uint8_t zone_id)
+{
+    if (zone_id >= 8) return CONFIG_INVALID_PARAMETER;
+
+    memset(&g_staging, 0, sizeof(g_staging));
+    g_staging.editing_zone_id = zone_id;
+    g_staging.session_active = true;
+
+    // Load existing zone if occupied
+    if (zone_is_slot_occupied(zone_id)) {
+        uint16_t zone_base = ZONE_ADDRESS(zone_id, 0);
+        uint8_t led_count;
+
+        // Get LED count
+        if (read_eeprom_field(zone_base + ZONE_LED_COUNT_OFFSET, &led_count, 1) == CONFIG_OK) {
+            // Read enhanced LED data
+            uint8_t led_data[32 * 4];
+            if (read_eeprom_field(zone_base + ZONE_LED_INDICES_OFFSET, led_data, led_count * 4) == CONFIG_OK) {
+
+                for (uint8_t i = 0; i < led_count && i < MAX_STAGING_KEYS; i++) {
+                    uint8_t base_offset = i * 4;
+                    uint8_t led_index = led_data[base_offset + 0];
+                    uint8_t row, col;
+
+                    if (get_key_for_led_index(led_index, &row, &col)) {
+                        g_staging.keys[g_staging.key_count] = (staging_key_t){
+                            .row = row,
+                            .col = col,
+                            .color = {
+                                .red = led_data[base_offset + 1],
+                                .green = led_data[base_offset + 2],
+                                .blue = led_data[base_offset + 3]
+                            },
+                            .active = true
+                        };
+                        g_staging.key_count++;
+                    }
+                }
+            }
+        }
+    }
+
+    return CONFIG_OK;
+}
+
+config_status_t session_get_staging_led_count(uint8_t *led_count)
+{
+    if (!led_count || !g_staging.session_active) return CONFIG_INVALID_PARAMETER;
+    *led_count = g_staging.key_count;
+    return CONFIG_OK;
+}
+
+config_status_t session_get_staging_led_data(uint8_t index, uint8_t *row,
+                                            uint8_t *col, rgb_color_t *color)
+{
+    if (!row || !col || !color || !g_staging.session_active ||
+        index >= g_staging.key_count) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    *row = g_staging.keys[index].row;
+    *col = g_staging.keys[index].col;
+    *color = g_staging.keys[index].color;
+    return CONFIG_OK;
+}
+
+config_status_t session_set_key_color(uint8_t row, uint8_t col, rgb_color_t color, bool type)
+{
+    if (!g_staging.session_active) return CONFIG_INVALID_PARAMETER;
+
+    // Validate row/col bounds for bit fields
+    if (row >= 6 || col >= 14) return CONFIG_INVALID_PARAMETER;
+
+    // Find existing key or add new one
+    for (uint8_t i = 0; i < g_staging.key_count; i++) {
+        if (g_staging.keys[i].row == row && g_staging.keys[i].col == col) {
+            g_staging.keys[i].color = color;
+            g_staging.keys[i].color_modified = type; // Use the type parameter
+            return CONFIG_OK;
+        }
+    }
+
+    // Add new key (shouldn't happen if selection logic works correctly)
+    if (g_staging.key_count >= MAX_STAGING_KEYS) return CONFIG_MEMORY_ERROR;
+
+    g_staging.keys[g_staging.key_count] = (staging_key_t){
+        .row = row,
+        .col = col,
+        .color = color,
+        .active = true,
+        .color_modified = type
+    };
+    g_staging.key_count++;
+    return CONFIG_OK;
+}
+
+config_status_t session_remove_key_color(uint8_t row, uint8_t col)
+{
+    if (!g_staging.session_active) return CONFIG_INVALID_PARAMETER;
+
+    // Find and remove the key from staging
+    for (uint8_t i = 0; i < g_staging.key_count; i++) {
+        if (g_staging.keys[i].row == row && g_staging.keys[i].col == col) {
+            // Shift remaining keys down
+            for (uint8_t j = i; j < g_staging.key_count - 1; j++) {
+                g_staging.keys[j] = g_staging.keys[j + 1];
+            }
+            g_staging.key_count--;
+            break;
+        }
+    }
+    return CONFIG_OK;
+}
+
+config_status_t session_commit_changes(void)
+{
+    if (!g_staging.session_active) return CONFIG_INVALID_PARAMETER;
+
+    // Pass staging keys directly instead of converting to separate arrays
+    config_status_t status = zone_save_basic_data(g_staging.editing_zone_id,
+                                                 g_staging.key_count,
+                                                 g_staging.keys);  // Pass keys directly
+
+    memset(&g_staging, 0, sizeof(g_staging));
+    return status;
+}
+
+config_status_t session_discard_changes(void)
+{
+    memset(&g_staging, 0, sizeof(g_staging));
+    return CONFIG_OK;
+}
+
+config_status_t session_end_edit(bool save_changes)
+{
+    config_status_t result = CONFIG_OK;
+
+    if (save_changes) {
+        // Commit changes to EEPROM
+        result = session_commit_changes();
+        if (result != CONFIG_OK) {
+            LOG_ERROR("Failed to commit session changes: %d", result);
+        }
+    } else {
+        // Discard changes and restore original state
+        result = session_discard_changes();
+        if (result != CONFIG_OK) {
+            LOG_ERROR("Failed to discard session changes: %d", result);
+        }
+    }
+
+    // Clear session state (add any session cleanup here)
+    // TODO: Add any session state cleanup if needed
+
+    return result;
+}
+
+config_status_t session_zone_load_staging_to_runtime(uint8_t runtime_slot)
+{
+    if (runtime_slot >= 2) {
+        return CONFIG_INVALID_PARAMETER;
+    }
+
+    if (!g_staging.session_active || g_staging.key_count == 0) {
+        LOG_WARNING("No active staging session or no keys to load");
+        return CONFIG_ERROR;
+    }
+
+    // Check if function pointer is set
+    if (zone_interface_ptr->load_keys_to_runtime == NULL) {
+        LOG_ERROR("Runtime loader function not set");
+        return CONFIG_ERROR;
+    }
+
+    if (!zone_interface_ptr || !zone_interface_ptr->load_keys_to_runtime) {
+            LOG_ERROR("Zone interface not set");
+            return CONFIG_ERROR;
+        }
+
+    // Call through function pointer
+    config_status_t result = zone_interface_ptr->load_keys_to_runtime(g_staging.keys,
+                                                     g_staging.key_count,
+                                                     runtime_slot);
+
+    if (result == CONFIG_OK) {
+        LOG_INFO("Successfully loaded staging to runtime slot %d", runtime_slot);
+    } else {
+        LOG_ERROR("Failed to load staging to runtime slot %d: %d", runtime_slot, result);
+    }
+
+    return result;
+}
+
+void session_set_zone_interface(const zone_interface_t *interface)
+{
+    zone_interface_ptr = interface;
 }
 
 /* ========================================================================
@@ -1662,3 +1963,5 @@ static uint32_t get_current_timestamp(void)
 {
 	return HAL_GetTick() / 1000; // Convert milliseconds to seconds
 }
+
+

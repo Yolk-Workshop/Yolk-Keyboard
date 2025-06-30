@@ -86,37 +86,6 @@ typedef struct {
 } Backlight_RGB_t;
 
 /* ========================================================================== */
-/* Keyboard Zone Definitions */
-/* ========================================================================== */
-
-typedef enum {
-    BACKLIGHT_ZONE_ALL = 0,             /**< All keys */
-    BACKLIGHT_ZONE_FUNCTION_KEYS,       /**< F1-F12, ESC, DEL */
-    BACKLIGHT_ZONE_NUMBER_ROW,          /**< 1-0, -, =, Backspace */
-    BACKLIGHT_ZONE_QWERTY_ROW,          /**< Tab, Q-P, [, ], Enter */
-    BACKLIGHT_ZONE_ASDF_ROW,            /**< Caps, A-L, ;, ', # */
-    BACKLIGHT_ZONE_ZXCV_ROW,            /**< Shift, Z-M, ,, . */
-    BACKLIGHT_ZONE_BOTTOM_ROW,          /**< Ctrl, Alt, Space, etc. */
-    BACKLIGHT_ZONE_WASD,                /**< WASD gaming keys */
-    BACKLIGHT_ZONE_ARROW_KEYS,          /**< Arrow key cluster */
-    BACKLIGHT_ZONE_MODIFIERS,           /**< All modifier keys */
-    BACKLIGHT_ZONE_ALPHAS,              /**< A-Z keys only */
-    BACKLIGHT_ZONE_NUMBERS,             /**< 1-0 keys only */
-    BACKLIGHT_ZONE_MAIN_TYPING,         /**< Main typing area: 1--, Q-P, A-L, Z-M */
-    BACKLIGHT_ZONE_COUNT
-} Backlight_Zone_t;
-
-/* ========================================================================== */
-/* Fade Configuration */
-/* ========================================================================== */
-
-typedef struct {
-    Backlight_RGB_t target_color;       /**< Target RGB color */
-    uint16_t duration_ms;               /**< Fade duration in milliseconds */
-    uint8_t steps;                      /**< Number of fade steps (default: 32) */
-} Backlight_Fade_Config_t;
-
-/* ========================================================================== */
 /* Core API */
 /* ========================================================================== */
 
@@ -285,93 +254,6 @@ Backlight_Error_t Backlight_SetAll(uint8_t r, uint8_t g, uint8_t b);
 Backlight_Error_t Backlight_SetAllBrightness(uint8_t brightness);
 
 /* ========================================================================== */
-/* Zone Control */
-/* ========================================================================== */
-
-/**
- * @brief Set zone to RGB color
- * @param zone Keyboard zone
- * @param color RGB color
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_SetZoneRGB(Backlight_Zone_t zone, Backlight_RGB_t color);
-
-/**
- * @brief Set zone to RGB color with intensity scaling
- * @param zone Keyboard zone
- * @param color RGB color
- * @param intensity Intensity scale (0-255, 255=full brightness)
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_SetZoneRGBIntensity(Backlight_Zone_t zone, Backlight_RGB_t color, uint8_t intensity);
-
-/**
- * @brief Set zone to RGB color (separate components)
- * @param zone Keyboard zone
- * @param r Red component (0-255)
- * @param g Green component (0-255)
- * @param b Blue component (0-255)
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_SetZone(Backlight_Zone_t zone, uint8_t r, uint8_t g, uint8_t b);
-
-/**
- * @brief Set zone to RGB color (separate components) with intensity scaling
- * @param zone Keyboard zone
- * @param r Red component (0-255)
- * @param g Green component (0-255)
- * @param b Blue component (0-255)
- * @param intensity Intensity scale (0-255, 255=full brightness)
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_SetZoneIntensity(Backlight_Zone_t zone, uint8_t r, uint8_t g, uint8_t b, uint8_t intensity);
-
-/**
- * @brief Set zone to RGB color (separate components)
- * @param zone Keyboard zone
- * @param r Red component (0-255)
- * @param g Green component (0-255)
- * @param b Blue component (0-255)
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_SetZone(Backlight_Zone_t zone, uint8_t r, uint8_t g, uint8_t b);
-
-/**
- * @brief Set zone to white brightness
- * @param zone Keyboard zone
- * @param brightness White brightness (0-255)
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_SetZoneBrightness(Backlight_Zone_t zone, uint8_t brightness);
-
-/**
- * @brief Turn off zone
- * @param zone Keyboard zone
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_SetZoneOff(Backlight_Zone_t zone);
-
-/* ========================================================================== */
-/* Pattern Loading */
-/* ========================================================================== */
-
-/**
- * @brief Load RGB pattern from array
- * @param pattern Array of Backlight_RGB_t colors, indexed by (row * BACKLIGHT_MATRIX_COLS + col)
- * @param size Size of pattern array (max BACKLIGHT_MATRIX_ROWS * BACKLIGHT_MATRIX_COLS)
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_LoadPattern(const Backlight_RGB_t *pattern, uint16_t size);
-
-/**
- * @brief Save current colors to pattern array
- * @param pattern Array to store current colors
- * @param size Size of pattern array
- * @return BACKLIGHT_OK on success
- */
-Backlight_Error_t Backlight_SavePattern(Backlight_RGB_t *pattern, uint16_t size);
-
-/* ========================================================================== */
 /* Status and Diagnostics */
 /* ========================================================================== */
 
@@ -428,13 +310,6 @@ Backlight_RGB_t Backlight_HSVtoRGB(uint16_t h, uint8_t s, uint8_t v);
 Backlight_RGB_t Backlight_RGB(uint8_t r, uint8_t g, uint8_t b);
 
 /**
- * @brief Get number of keys in zone
- * @param zone Keyboard zone
- * @return Number of keys in zone
- */
-uint8_t Backlight_GetZoneKeyCount(Backlight_Zone_t zone);
-
-/**
  * @brief Apply gamma correction using lookup table (no FPU)
  * @param linear_value Linear brightness value (0-255)
  * @return Gamma corrected value
@@ -470,27 +345,6 @@ Backlight_Error_t Backlight_SetUserMaxLimit(uint8_t max_limit);
 #define BACKLIGHT_BRIGHTNESS_MEDIUM    128
 #define BACKLIGHT_BRIGHTNESS_HIGH      192
 #define BACKLIGHT_BRIGHTNESS_MAX       255
-
-// Common key shortcuts (using your mapping)
-#define BACKLIGHT_KEY_ESC              0, 0
-#define BACKLIGHT_KEY_SPACE            5, 4
-#define BACKLIGHT_KEY_ENTER            2, 13
-#define BACKLIGHT_KEY_WASD_W           2, 2
-#define BACKLIGHT_KEY_WASD_A           3, 1
-#define BACKLIGHT_KEY_WASD_S           3, 2
-#define BACKLIGHT_KEY_WASD_D           3, 3
-
-// Zone shortcuts
-#define BACKLIGHT_SET_WASD(color)      Backlight_SetZoneRGB(BACKLIGHT_ZONE_WASD, color)
-#define BACKLIGHT_SET_ARROWS(color)    Backlight_SetZoneRGB(BACKLIGHT_ZONE_ARROW_KEYS, color)
-#define BACKLIGHT_SET_FUNCTION(color)  Backlight_SetZoneRGB(BACKLIGHT_ZONE_FUNCTION_KEYS, color)
-#define BACKLIGHT_SET_MAIN_TYPING(color) Backlight_SetZoneRGB(BACKLIGHT_ZONE_MAIN_TYPING, color)
-
-// Intensity shortcuts
-#define BACKLIGHT_SET_MAIN_BRIGHT()    Backlight_SetZoneIntensity(BACKLIGHT_ZONE_MAIN_TYPING, 255, 255, 0, 255)
-#define BACKLIGHT_SET_MAIN_DIM()       Backlight_SetZoneIntensity(BACKLIGHT_ZONE_MAIN_TYPING, 255, 255, 0, 128)
-#define BACKLIGHT_SET_OTHERS_DIM()     Backlight_SetZoneIntensity(BACKLIGHT_ZONE_ALL, 255, 255, 0, 64); \
-                                       Backlight_SetZoneIntensity(BACKLIGHT_ZONE_MAIN_TYPING, 255, 255, 0, 255)
 
 // Animation shortcuts
 #define BACKLIGHT_FADE_OUT(duration)   Backlight_FadeBrightness(0, duration)

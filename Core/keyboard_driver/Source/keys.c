@@ -10,6 +10,7 @@
 #include "logger.h"
 #include <string.h>
 #include "effects.h"
+#include "config_ui.h"
 
 // Global state
 ble_hid_report_t ble_report;
@@ -18,7 +19,9 @@ keystate_t key_states[KEY_ROWS][KEY_COLS] = { 0 };
 static uint32_t last_change_time[KEY_ROWS][KEY_COLS] = { 0 };
 volatile bool g_usb_suspended = false;
 extern volatile uint8_t report_ready_flag;
+
 keymap_t layers[KEY_LAYERS] = { 0 };
+
 
 //Add phantom filtering variables
 static uint32_t last_any_key_time = 0;
@@ -67,23 +70,23 @@ keymap_t fn_keymap = {
       KC_PLAY, KC_NEXT, KC_VOLDOWN, KC_VOLUP, KC_LOCK },
 
     // Row 1: Number row (1-9, 0, -, =, Backspace)
-    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
-      KC_NO, KC_NO, KC_NO, KC_NO },
+    { KC_NO, KC_1, KC_2, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
+      KC_NO, KC_NO, KC_NO, KC_BSPACE },
 
     // Row 2: QWERTY row (Q-P, [, ], Enter) - P is at position 10
     { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
-      KC_P, KC_NO, KC_NO, KC_NO },  // KC_P for pairing control
+      KC_P, KC_NO, KC_NO, KC_ENTER },  // KC_P for pairing control
 
     // Row 3: ASDF row (A-L, ;, ', #, SWAP) - SWAP is at position 13
-    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
-      KC_NO, KC_NO, KC_NO, KC_SWAP },  // KC_SWAP for device switching
+    { KC_NO, KC_NO, KC_S, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_L,
+      KC_NO, KC_NO, KC_NONUS_HASH, KC_SWAP },  // KC_SWAP for device switching
 
     // Row 4: ZXCV row (Shift, \, Z-M, comma, period, /, Up, RShift)
-    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
+    { KC_NO, KC_NO, KC_Z, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
       KC_NO, KC_NO, KC_NO, KC_NO },
 
     // Row 5: Bottom row (Fn, Ctrl, Win, Alt, Space, RAlt, RCtrl, arrows)
-    { KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
+    { KC_NO, KC_NO, KC_NO, KC_LALT, KC_SPACE, KC_NO, KC_NO, KC_NO, KC_NO, KC_NO,
       KC_NO, KC_NO, KC_NO, KC_NO }
 };
 
@@ -553,26 +556,48 @@ static void handleFnKey(uint8_t keycode, bool pressed)
         }
     }
 
+    if(keycode == KC_SPACE && pressed){
+    	EffectsToggleBacklight();
+    	return;
+    }
+
+    if(keycode == KC_Z && pressed){
+    	bool current_status = Effects_HasRuntimeZones();
+		Effects_ToggleRuntimeZones(!current_status);
+    	return;
+    }
+
+    if(keycode == KC_1  && pressed){
+    	Effects_SwitchRuntimeZone(0);
+		return;
+	}
+
+    if(keycode == KC_2 && pressed){
+		Effects_SwitchRuntimeZone(1);
+		return;
+	}
+
+    if(config_ui_update_entry_sequence(keycode, pressed)){
+    	return;
+    }
+
     // Try to handle as media key
     if (process_media_key(keycode, pressed)) {
-        return; // Key handled
+        return;
     }
 
     // Try to handle as system function key
     if (process_system_function_key(keycode, pressed)) {
-        return; // Key handled
+        return;
     }
 
     // Try to handle as internal function key
     if (process_internal_function_key(keycode, pressed)) {
-        return; // Key handled
+        return;
     }
 
     // If we reach here, the key was not handled
     LOG_DEBUG("Unhandled function key: 0x%02X (pressed: %d)", keycode, pressed);
-
-    // Set report ready flag for any unhandled keys that might still need processing
-    report_ready_flag = 1;
 }
 
 static bool isPhantomKey(uint8_t row, uint8_t col, uint32_t current_time, bool pressed) {
@@ -614,8 +639,12 @@ void processKey(uint8_t row, uint8_t col, bool pressed)
 	last_column_time[col] = current_time;
 
 	uint8_t keycode = layers[BASE_LAYER][row][col];
-
 	if (keycode == KC_FN) kb_state.fn_pressed = pressed;
+
+	if(config_ui_is_active()){
+		config_ui_handle_key_event(row,col,pressed);
+		return;
+	}
 
 	// Get the keycode from the current layer (which may have changed if FN was pressed/released)
 	uint8_t current_layer = getCurrentLayer();
@@ -694,6 +723,11 @@ keystate_t handleHeld(uint8_t row, uint8_t col, bool col_pressed,
 keystate_t handleReleased(uint8_t row, uint8_t col, bool col_pressed,
 		uint32_t current_time)
 {
+	if(!kb_state.fn_pressed){
+		uint8_t keycode = layers[BASE_LAYER][row][col];
+		if (keycode == KC_FN) kb_state.fn_pressed = col_pressed;
+	}
+
 	return KEY_IDLE;
 }
 
